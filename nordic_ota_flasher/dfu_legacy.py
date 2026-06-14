@@ -1,0 +1,305 @@
+"""
+The LEGACY Nordic DFU state machine (the brick-sensitive part).
+
+Sequence for an application image, all Control Point writes use write-with-response,
+all Packet writes use write-without-response:
+
+  0. (notifications already enabled by the transport)
+  1. START      : CtrlPt <- [01, mode]      ; Packet <- 12-byte size block ; await [10,01,01]
+  2. INIT       : CtrlPt <- [02, 00]         ; Packet <- .dat bytes ; CtrlPt <- [02, 01] ; await [10,02,01]
+  3. PRN        : CtrlPt <- [08, n_lo, n_hi] (optional flow control)
+  4. RECEIVE    : CtrlPt <- [03]             ; Packet <- firmware ; (PRN reports every n) ; await [10,03,01]
+  5. VALIDATE   : CtrlPt <- [04]             ; await [10,04,01]  (status 05 = CRC error)
+  6. ACTIVATE   : CtrlPt <- [05]             ; NO response — wait for the peer to drop the link
+
+Safety: if VALIDATE fails we never send ACTIVATE, so the device keeps its old image.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import struct
+import time
+
+from . import constants as C
+from .ble_transport import BleDisconnected, BleTransport
+from .dfu_package import DfuImage
+
+
+class DfuError(Exception):
+    pass
+
+
+class DfuInvalidState(DfuError):
+    """The device rejected a command with INVALID_STATE — its DFU state machine is wedged
+    in a non-IDLE state (e.g. a prior transfer aborted mid-stream). Recover with SYS_RESET."""
+
+
+class LegacyDfu:
+    def __init__(
+        self,
+        transport: BleTransport,
+        image: DfuImage,
+        prn: int = C.DEFAULT_PRN,
+        log=None,
+        progress=None,
+    ):
+        self.t = transport
+        self.img = image
+        self.prn = max(0, int(prn))
+        self._log = log or (lambda *_: None)
+        # progress(sent: int, total: int, bits_per_sec: float)
+        self._progress = progress or (lambda *_: None)
+        self._unknown_logged = 0
+        self._eff_prn = 0
+        # populated by _stream_firmware for the post-flash summary
+        self.transfer_bytes = 0
+        self.transfer_seconds = 0.0
+
+    def _effective_prn(self, cs: int) -> int:
+        """Hold the per-receipt BYTE budget ~constant regardless of MTU. PRN counts packets,
+        so big chunks need a smaller PRN (else bytes-in-flight overruns the receiver)."""
+        if self.prn <= 0:
+            return 0
+        if cs <= C.MIN_CHUNK:
+            return self.prn
+        # cap to the byte-budget at high MTU, but honor a user who set an even lower PRN
+        return max(1, min(self.prn, round(C.TARGET_PRN_BYTES / cs)))
+
+    @property
+    def avg_bps(self) -> float:
+        """Average firmware-transfer rate in bits/sec (0 until streaming completes)."""
+        return (self.transfer_bytes * 8 / self.transfer_seconds) if self.transfer_seconds > 0 else 0.0
+
+    # -- notification helpers ----------------------------------------------
+    @staticmethod
+    def _parse_prn(msg: bytes) -> int | None:
+        """Return the bytes-received count if msg is a packet-receipt notification.
+
+        Two wire forms are accepted:
+          * Standard Nordic legacy DFU: [0x11, <u32 LE>]  (what the nRF DFU app expects)
+          * Adafruit 'bytes received' report variant: [0x10, 0x07, 0x01, <u32 LE>]
+        """
+        if len(msg) >= 5 and msg[0] == C.OP_PKT_RCPT_NOTIF:
+            return int.from_bytes(msg[1:5], "little")
+        if len(msg) >= 7 and msg[0] == C.OP_RESPONSE and msg[1] == C.OP_IMAGE_SIZE_REQ:
+            return int.from_bytes(msg[3:7], "little")
+        return None
+
+    def _log_unknown(self, where: str, msg: bytes) -> None:
+        # Surface the raw bytes of unexpected notifications (capped) so the real wire
+        # format is visible if any assumption is still off.
+        if self._unknown_logged < 8:
+            self._unknown_logged += 1
+            self._log(f"  [debug] unexpected notification during {where}: {msg.hex(' ')}")
+
+    async def _await_response(self, expected_op: int, timeout: float = 30.0) -> int:
+        """Wait for a [0x10, expected_op, status] ack, skipping packet-receipt reports."""
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DfuError(f"Timed out waiting for ack to op 0x{expected_op:02X}")
+            try:
+                msg = await self.t.next_notification(remaining)
+            except TimeoutError:
+                raise DfuError(f"Timed out waiting for ack to op 0x{expected_op:02X}")
+            if self._parse_prn(msg) is not None:
+                continue  # a packet-receipt / bytes-received report, not a command ack
+            if len(msg) >= 3 and msg[0] == C.OP_RESPONSE:
+                req, status = msg[1], msg[2]
+                if req == expected_op:
+                    if status != C.RESP_SUCCESS:
+                        msg = (
+                            f"Device rejected op 0x{expected_op:02X}: "
+                            f"{C.RESP_NAMES.get(status, status)}"
+                        )
+                        if status == C.RESP_INVALID_STATE:
+                            raise DfuInvalidState(msg)
+                        raise DfuError(msg)
+                    return status
+                self._log_unknown(f"ack-wait 0x{expected_op:02X}", msg)
+            else:
+                self._log_unknown(f"ack-wait 0x{expected_op:02X}", msg)
+
+    async def _await_prn(self, timeout: float = 30.0) -> int:
+        """Wait for a packet-receipt notification; return the device's bytes-received count."""
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DfuError("Timed out waiting for a packet-receipt notification")
+            try:
+                msg = await self.t.next_notification(remaining)
+            except TimeoutError:
+                raise DfuError("Timed out waiting for a packet-receipt notification")
+            n = self._parse_prn(msg)
+            if n is not None:
+                return n
+            self._log_unknown("firmware streaming", msg)
+
+    # -- main flow ----------------------------------------------------------
+    async def run(self) -> bool:
+        """Run the full DFU. Returns True if a manual reset is likely required
+        (image is committed but the device did not auto-reboot)."""
+        img = self.img
+        if not img.device_type_ok():
+            if img.device_type is None:
+                raise DfuError(
+                    "Could not read device_type from the init packet (.dat malformed or "
+                    "too short). Refusing to flash: the brick-safety check requires "
+                    f"device_type == 0x{C.ADAFRUIT_DEVICE_TYPE:04X}."
+                )
+            raise DfuError(
+                f"Init packet device_type=0x{img.device_type:04X} but this bootloader "
+                f"requires 0x{C.ADAFRUIT_DEVICE_TYPE:04X}. This firmware is for a different "
+                f"device and would be rejected. Aborting before upload."
+            )
+
+        self.t.drain()
+
+        # 1) START
+        self._log(
+            f"START_DFU mode={img.mode_label} "
+            f"(sd={img.sd_size}, bl={img.bl_size}, app={img.app_size}, total={img.total_size} B)"
+        )
+        await self.t.write_ctrl(bytes([C.OP_START_DFU, img.mode]))
+        await self.t.write_packet(img.size_block)
+        await self._await_response(C.OP_START_DFU)
+
+        # 2) INIT packet
+        self._log(f"Sending init packet ({len(img.dat_data)} B)")
+        await self.t.write_ctrl(bytes([C.OP_RECEIVE_INIT, C.INIT_RX]))
+        cs = self.t.chunk_size
+        for i in range(0, len(img.dat_data), cs):
+            await self.t.write_packet(img.dat_data[i : i + cs])
+        await self.t.write_ctrl(bytes([C.OP_RECEIVE_INIT, C.INIT_COMPLETE]))
+        await self._await_response(C.OP_RECEIVE_INIT)
+
+        # 3) Packet-receipt-notification interval (flow control). Scaled to the chunk size
+        # so the bytes-in-flight stay near TARGET_PRN_BYTES regardless of negotiated MTU.
+        cs = self.t.chunk_size
+        self._eff_prn = self._effective_prn(cs)
+        if self._eff_prn > 0:
+            self._log(
+                f"Setting packet-receipt interval = {self._eff_prn} "
+                f"(chunk {cs} B, ~{self._eff_prn * cs} B in flight)"
+            )
+            await self.t.write_ctrl(bytes([C.OP_PKT_RCPT_REQ]) + struct.pack("<H", self._eff_prn))
+
+        # 4) RECEIVE firmware
+        self._log("Streaming firmware image...")
+        await self.t.write_ctrl(bytes([C.OP_RECEIVE_FW]))
+        await self._stream_firmware()
+        # If a window was lost (device short), this ack never comes — fail in 30 s so the
+        # controller's reliable-rung retry can take a fresh shot, rather than waiting 60 s.
+        await self._await_response(C.OP_RECEIVE_FW, timeout=30.0)
+        self._log("Firmware image received by device.")
+
+        # 5) VALIDATE (CRC16 over received image vs the .dat trailer)
+        self._log("Validating image (CRC16)...")
+        await self.t.write_ctrl(bytes([C.OP_VALIDATE]))
+        await self._await_response(C.OP_VALIDATE)
+        self._log("Validation OK.")
+
+        # 6) ACTIVATE + RESET. Op 0x05 does NOT call NVIC_SystemReset() itself; the
+        # bootloader requests a peer disconnect and the app-jump happens as the DFU loop
+        # unwinds. A clean reboot drops the link in ~1-3 s, so 10 s is ample.
+        self._log("Activating new image and resetting...")
+        await self.t.write_ctrl(bytes([C.OP_ACTIVATE_RESET]))
+        dropped = await self._wait_for_disconnect(timeout=10.0)
+        if dropped:
+            self._log("Device dropped the link — rebooting into the new firmware.")
+            return False
+        # No peer disconnect: image is committed (VALIDATE passed) but the device did not
+        # auto-reboot — the stock 'AdaDFU' bootloader USB hang. Report success + manual kick.
+        self._log("WARNING: " + C.STOCK_BOOTLOADER_HANG_MSG.replace("\n\n", " "))
+        return True
+
+    async def _stream_firmware(self) -> None:
+        data = self.img.bin_data
+        total = len(data)
+        cs = self.t.chunk_size
+        prn = self._eff_prn
+        pace = cs > C.MIN_CHUNK  # light throttle on the high-MTU (fragmenting) path only
+        sent = 0
+        pkts_since_prn = 0
+        prn_misses = 0
+        first_prn = True
+        start = time.monotonic()
+        last_emit = 0.0
+
+        while sent < total:
+            chunk = data[sent : sent + cs]
+            await self.t.write_packet(chunk)
+            if pace:
+                await asyncio.sleep(C.HIGH_MTU_PACE_S)
+            sent += len(chunk)
+            pkts_since_prn += 1
+
+            now = time.monotonic()
+            if now - last_emit >= 0.1 or sent == total:
+                elapsed = now - start
+                bps = (sent * 8 / elapsed) if elapsed > 0 else 0.0
+                self._progress(sent, total, bps)
+                last_emit = now
+
+            # Flow control: after N packets wait for the device's byte-count report,
+            # but never wait after the final packet (the device sends the RECEIVE ack instead).
+            if prn > 0 and pkts_since_prn >= prn and sent < total:
+                # The first receipt can be tens of seconds out (initial flash erase); wait it
+                # out so we don't push the next window into a full buffer mid-erase.
+                prn_timeout = C.FIRST_PRN_TIMEOUT_S if first_prn else 30.0
+                first_prn = False
+                try:
+                    acked = await self._await_prn(timeout=prn_timeout)
+                    prn_misses = 0
+                    if acked != sent and self._unknown_logged < 8:
+                        # Don't abort — the device may count differently; VALIDATE's CRC16
+                        # is the authoritative integrity check. Just surface it (capped).
+                        self._unknown_logged += 1
+                        self._log(
+                            f"  [debug] PRN count: device acked {acked}, sent {sent} "
+                            "(continuing; VALIDATE verifies the CRC)."
+                        )
+                except DfuError:
+                    # Tolerate a transient missed receipt; only abort after several in a row.
+                    prn_misses += 1
+                    if prn_misses >= C.MAX_PRN_MISSES:
+                        raise
+                    self._log(
+                        f"  [debug] missed packet-receipt ({prn_misses}/{C.MAX_PRN_MISSES}) "
+                        "— continuing (VALIDATE will verify the CRC)."
+                    )
+                pkts_since_prn = 0
+
+        self.transfer_bytes = sent
+        self.transfer_seconds = max(time.monotonic() - start, 1e-6)
+
+    async def _wait_for_disconnect(self, timeout: float) -> bool:
+        """Wait for the peer-initiated link drop after ACTIVATE.
+
+        The disconnect is the only proof ACTIVATE took effect (the op has no ack), so a
+        timeout is reported as False rather than treated as confirmed success.
+        Returns True if a real disconnect was observed, False on timeout.
+        """
+        try:
+            while True:
+                await self.t.next_notification(timeout)
+        except BleDisconnected:
+            return True
+        except (asyncio.TimeoutError, TimeoutError):
+            return False
+
+    async def send_sys_reset(self) -> None:
+        """Reboot the bootloader (SYS_RESET 0x06) to clear a wedged non-IDLE DFU state.
+
+        Safe here: there is no valid app to corrupt — the bootloader re-enters OTA DFU in
+        IDLE on reboot. The write may error as the device resets mid-operation; that's fine.
+        """
+        self.t.drain()
+        try:
+            await self.t.write_ctrl(bytes([C.OP_SYS_RESET]))
+        except Exception as e:  # noqa: BLE001 - device reboots mid-write, benign
+            self._log(f"(SYS_RESET write returned '{e}' — expected, device is resetting)")
+        await self._wait_for_disconnect(timeout=5.0)
