@@ -435,9 +435,9 @@ class MainWindow(QWidget):
         self.cached_combo.clear()
         if files:
             self.cached_combo.addItems(files)
-            idx = self.cached_combo.findText(current)
-            if idx >= 0:
-                self.cached_combo.setCurrentIndex(idx)
+            # Default to no selection (blank); only restore a prior explicit pick on refresh.
+            idx = self.cached_combo.findText(current) if current else -1
+            self.cached_combo.setCurrentIndex(idx)
         else:
             self.cached_combo.addItem("(no downloads yet)")
         self.load_cached_btn.setEnabled(bool(files) and not self._busy)
