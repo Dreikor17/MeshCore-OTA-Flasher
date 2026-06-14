@@ -60,12 +60,16 @@ ADAFRUIT_DEVICE_TYPE = 0x0052  # 82
 # pstorage ring so one lazy page-erase can absorb a full window without dropping data.
 DEFAULT_PRN = 8
 
-# Firmware chunk cap for the high-MTU path. Capped conservatively at 180 (not the full
-# 247-3=244) because a high ATT MTU does NOT guarantee the link-layer Data Length was
-# extended on Windows — 244-byte write-without-response then fragments into a ~10-PDU burst
-# with no flow control and overruns the receiver. 180 is still ~9x the 20-byte path.
-MAX_CHUNK = 180
-MIN_CHUNK = 20  # one un-fragmented link-layer packet at the classic 23-byte ATT MTU
+# Firmware chunk = MTU-3 (244 at the negotiated 247). The Nordic Android DFU client streams
+# firmware at MTU-3 too (it grows its send buffer to mtu-3 once MTU is negotiated), which FILLS
+# the bootloader's MTU-sized RX buffer blocks. Feeding 20-byte writes into those ~244-byte
+# blocks wastes most of each block and exhausts the small (~8-block) pool after a few packets —
+# then the bootloader silently ignores all further Packet writes (no receipt, no error). That
+# was the real "device won't ack the first window" bug, and WinRT won't let us lower the MTU,
+# so we MATCH it instead. bleak/WinRT awaits each write-without-response (write_value_with_
+# result), so 244-byte writes are serialized one-at-a-time, not a fire-and-forget burst.
+MAX_CHUNK = 244
+MIN_CHUNK = 20  # one un-fragmented packet at ATT MTU 23 — the slow fallback geometry
 
 # write-without-response has no over-air back-pressure, and PRN counts PACKETS (not bytes),
 # so the per-receipt byte budget must be held roughly constant regardless of MTU. Derive the

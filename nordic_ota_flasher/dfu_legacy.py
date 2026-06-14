@@ -38,7 +38,14 @@ class DfuInvalidState(DfuError):
 class DfuDeviceShort(DfuError):
     """The whole image streamed but VALIDATE shows the device never reached "received-all" —
     data was lost in transit. Legacy DFU can't retransmit, so retrying the same way just
-    re-drops; the fix is environmental (flash on battery — see DEVICE_SHORT_USB_RESET_MSG)."""
+    re-drops; the controller steps the chunk ladder down / fails fast (see DEVICE_SHORT_MSG)."""
+
+
+class DfuNoFirstReceipt(DfuError):
+    """The device received START + the init packet but never sent a packet-receipt for the
+    FIRST firmware window — almost always a packet-size/PRN mismatch with this bootloader's
+    MTU-sized RX buffer pool (e.g. 20-byte writes into 244-byte blocks). The controller resets
+    the half-started transfer and retries at the next (smaller) chunk geometry."""
 
 
 class LegacyDfu:
@@ -66,13 +73,15 @@ class LegacyDfu:
         self.transfer_seconds = 0.0
 
     def _effective_prn(self, cs: int) -> int:
-        """Hold the per-receipt BYTE budget ~constant regardless of MTU. PRN counts packets,
-        so big chunks need a smaller PRN (else bytes-in-flight overruns the receiver)."""
+        """Effective packet-receipt interval = writes-per-window. The bootloader allocates one
+        MTU-sized RX block PER Packet write from a small (~8-block) pool, so we must keep the
+        writes in flight per window well under that pool or it exhausts and goes silent. At the
+        MTU-3 (244 B) chunk the byte budget yields ~2; on the 20-byte fallback use 1 (one block
+        at a time, so the pool always drains to flash first) — the OTAFIX 'try PRN 1' guidance."""
         if self.prn <= 0:
             return 0
         if cs <= C.MIN_CHUNK:
-            return self.prn
-        # cap to the byte-budget at high MTU, but honor a user who set an even lower PRN
+            return 1
         return max(1, min(self.prn, round(C.TARGET_PRN_BYTES / cs)))
 
     @property
@@ -319,16 +328,21 @@ class LegacyDfu:
                 try:
                     acked = await self._await_prn(timeout=timeout)
                 except DfuError:
-                    # No receipt within the backstop while still connected → the device is
-                    # wedged (a fresh START can "succeed" yet never ack data when the bootloader
-                    # was left non-IDLE by a prior aborted transfer; resetting clears it). Do NOT
-                    # stream the next window. Signal a wedged state so the controller does a
-                    # SYS_RESET + reconnect + retry — a smaller chunk would not unwedge it.
                     self._prn_misses_total += 1
-                    where = "first data window" if first_prn else "mid-stream"
+                    secs = time.monotonic() - t0
+                    if first_prn:
+                        # The device received START + init but never acked the first firmware
+                        # window — a packet-size/PRN geometry mismatch with its RX buffer pool.
+                        # Distinct signal so the controller tries the next (smaller) chunk size.
+                        raise DfuNoFirstReceipt(
+                            f"No packet-receipt for the first {sent}-byte window in {secs:.0f}s "
+                            f"(chunk {cs} B, PRN {prn}) — the device took START and the init "
+                            "packet but is silent on firmware (buffer/PRN geometry mismatch)."
+                        )
+                    # Mid-stream silence after earlier receipts → likely wedged; reset + retry.
                     raise DfuInvalidState(
-                        f"Device sent no packet-receipt for {time.monotonic() - t0:.0f}s "
-                        f"({where}) while still connected — it appears wedged."
+                        f"Device sent no packet-receipt for {secs:.0f}s mid-stream while still "
+                        "connected — it appears wedged."
                     )
                 last_acked = acked
                 if first_prn:

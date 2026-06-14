@@ -17,7 +17,13 @@ from PySide6.QtCore import QObject, Signal
 from . import buttonless
 from . import constants as C
 from .ble_transport import BleDisconnected, BleTransport, get_adapter_names
-from .dfu_legacy import DfuDeviceShort, DfuError, DfuInvalidState, LegacyDfu
+from .dfu_legacy import (
+    DfuDeviceShort,
+    DfuError,
+    DfuInvalidState,
+    DfuNoFirstReceipt,
+    LegacyDfu,
+)
 from .dfu_package import DfuImage
 from .scanner import FoundDevice
 
@@ -64,16 +70,15 @@ class FlashController(QObject):
             else:
                 self.log.emit(f"Device is already in DFU/bootloader mode: {device.name}")
 
-            # Fallback ladder: try the fast high-MTU path first, then progressively smaller
-            # chunks, ending at the proven 20-byte stock path so the flash always completes
-            # if the hardware works at all. Each rung is a full reconnect + fresh START_DFU.
-            # The bootloader (SD+BL) flash is brick-sensitive and many adapters can't sustain
-            # high-MTU writes for it, so always use the reliable 20-byte path for it.
+            # Chunk ladder: full MTU-3 (244 B — exactly what the Nordic Android client sends; it
+            # FILLS the bootloader's MTU-sized RX buffer blocks) first, then progressively
+            # smaller. Each rung is a full reconnect + fresh START_DFU. The 20-byte rung is a
+            # slow LAST RESORT (it drops to PRN=1 so it can't exhaust the buffer pool — 20-byte
+            # is the geometry that made this bootloader go silent). "Reliable" simply omits it.
             if image.is_bootloader and not reliable:
                 reliable = True
-                self.log.emit("Bootloader package — using the reliable 20-byte path.")
-            # Reliable mode skips the high-MTU rungs and goes straight to the proven 20-byte path.
-            rungs = [C.MIN_CHUNK] if reliable else [None, 128, C.MIN_CHUNK]
+                self.log.emit("Bootloader package — skipping the slow 20-byte last-resort rung.")
+            rungs = [None, 128] if reliable else [None, 128, C.MIN_CHUNK]
             max_last_rung_tries = 3  # retry the reliable rung on transient failures
             last_rung_tries = 0
             max_resets = 4  # each failed attempt wedges the state; allow a reset per retry
@@ -99,6 +104,36 @@ class FlashController(QObject):
                 try:
                     manual_reset = await dfu.run()
                     break
+                except DfuNoFirstReceipt as e:
+                    # Device took START + init but never acked the first firmware window — the
+                    # packet-size/PRN geometry is wrong for its RX buffer pool. Reset the
+                    # half-started transfer, then try the next (smaller) chunk geometry.
+                    self.log.emit(str(e))
+                    self.phase.emit("Resetting bootloader")
+                    try:
+                        await dfu.send_sys_reset()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    try:
+                        await transport.disconnect()
+                    except Exception:
+                        pass
+                    transport = None
+                    await asyncio.sleep(C.SYS_RESET_SETTLE_S)
+                    refreshed = await buttonless.find_bootloader(
+                        attempts=4, per_scan=4.0, log=self.log.emit
+                    )
+                    if refreshed is not None:
+                        target = refreshed
+                    if i < len(rungs) - 1:
+                        i += 1
+                        self.log.emit("Retrying at a smaller packet size...")
+                        continue
+                    raise DfuError(
+                        "The device never acknowledged the first firmware window at any packet "
+                        "size. START and the init packet worked (so the link is fine) — this is a "
+                        "bootloader buffer/PRN mismatch. Save the verbose log so it can be tuned."
+                    )
                 except DfuDeviceShort:
                     # A window was lost in transit. On a high-MTU rung, step down to the proven
                     # smaller chunk (write-without-response fragmentation can overrun). On the
