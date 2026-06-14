@@ -12,7 +12,7 @@ Nordic DFU protocol used by the Adafruit nRF52 bootloader and the
 
 ## Download
 
-Grab **`MeshCore-OTA-Flasher-v0.1.0.exe`** from the
+Grab **`MeshCore-OTA-Flasher-v0.2.0.exe`** from the
 [**latest release**](https://github.com/Dreikor17/MeshCore-OTA-Flasher/releases/latest) — a
 single self-contained file, no install needed. Just run it.
 
@@ -104,6 +104,19 @@ unused Qt modules).
 
 ## Releases / Changelog
 
+### v0.2.0
+Reliability release — OTA now completes end-to-end on RAK4631 / nRF52840 (firmware **and** the
+OTAFIX bootloader), verified on hardware.
+- **Fixed the core stall:** firmware now streams at the full negotiated packet size (MTU-3,
+  ~244 bytes), exactly like the Nordic mobile app. The previous 20-byte path silently exhausted
+  this bootloader's receive-buffer pool, so it never acknowledged the first packet and the
+  transfer hung.
+- **Strict per-window flow control:** waits for each packet-receipt before sending more (never
+  streams ahead), with an automatic 244 → 128-byte fallback for difficult adapters.
+- Fast detection + auto-reset/retry when a bootloader is left wedged by a prior aborted transfer.
+- Verbose, timestamped logging and a one-click **Save log…** for diagnostics.
+- Packet-receipt interval (PRN) now defaults to 10 and is adjustable.
+
 ### v0.1.0
 First public release.
 - BLE OTA flashing of MeshCore firmware to nRF52840 / RAK4631 (legacy Nordic DFU).
@@ -113,5 +126,4 @@ First public release.
 - Fetch latest firmware (repeater / companion / room-server) and the OTAFIX bootloader from
   GitHub; cached for offline reuse.
 - Live signal meter, progress + bitrate + ETA, and a post-flash summary (adapter, time, rate).
-- Full-MTU (244-byte) streaming matching the Nordic mobile app, with an automatic chunk-size
-  fallback and stuck-state (SYS_RESET) recovery for robust transfers across varied BLE adapters.
+- "Reliable" mode, a chunk-size fallback ladder, and stuck-state (SYS_RESET) recovery.
