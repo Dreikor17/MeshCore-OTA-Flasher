@@ -131,17 +131,34 @@ class LegacyDfu:
             else:
                 self._log_unknown(f"ack-wait 0x{expected_op:02X}", msg)
 
-    async def _await_prn(self, timeout: float = 30.0) -> int:
-        """Wait for a packet-receipt notification; return the device's bytes-received count."""
+    async def _await_prn(self, timeout: float = 60.0) -> int:
+        """Wait for a packet-receipt notification; return the device's bytes-received count.
+
+        Mirrors the Nordic reference, which waits for each receipt effectively forever (bounded
+        only by disconnect): the SoftDevice can defer a flash erase for several seconds behind
+        radio events and legitimately withholds the receipt that whole time. We must wait it out
+        and NEVER send the next window early. `timeout` is only a hung-but-connected backstop; a
+        real disconnect raises BleDisconnected and aborts immediately. A long wait emits a
+        periodic note so the user sees the device is busy, not frozen.
+        """
         deadline = time.monotonic() + timeout
+        start = time.monotonic()
+        next_note = start + 4.0
         while True:
-            remaining = deadline - time.monotonic()
+            now = time.monotonic()
+            remaining = deadline - now
             if remaining <= 0:
                 raise DfuError("Timed out waiting for a packet-receipt notification")
+            if now >= next_note:
+                self._log(
+                    "  device busy (likely erasing flash) — waiting for the packet-receipt "
+                    f"({now - start:.0f}s)…"
+                )
+                next_note = now + 4.0
             try:
-                msg = await self.t.next_notification(remaining)
-            except TimeoutError:
-                raise DfuError("Timed out waiting for a packet-receipt notification")
+                msg = await self.t.next_notification(min(remaining, next_note - now))
+            except (asyncio.TimeoutError, TimeoutError):
+                continue  # sub-wait elapsed; loop to emit the periodic note / re-check deadline
             n = self._parse_prn(msg)
             if n is not None:
                 return n
@@ -223,22 +240,16 @@ class LegacyDfu:
         try:
             await self._await_response(C.OP_VALIDATE)
         except DfuInvalidState:
-            # VALIDATE is "invalid" only because the device never reached "received-all" — it
-            # is SHORT. We streamed the whole image, so a window was lost in transit (on the
-            # nRF52840 almost always a USB re-enumeration during a flash erase). A reset+retry
-            # just re-drops, so clear the wedged state and fail fast with actionable guidance.
-            short_note = ""
-            if self._prn_misses_total:
-                short_note = (
-                    f" (a {self._prn_misses_total}× multi-second packet-receipt stall was "
-                    "seen during the transfer — the signature of that USB reset)"
-                )
-            self._log("Device reports the image is SHORT — data was lost in transit" + short_note + ".")
+            # VALIDATE is "invalid" only because the device never reached "received-all" — it is
+            # SHORT. We streamed the whole image, so a window was lost in transit. With the
+            # receipt-gate fix this should be rare; surface it clearly and clear the wedged state
+            # so the next attempt (or a smaller chunk) starts clean.
+            self._log("Device reports the image is SHORT — a window was lost in transit.")
             try:
                 await self.send_sys_reset()  # reboot to a clean OTA-DFU state for the next attempt
             except Exception:  # noqa: BLE001
                 pass
-            raise DfuDeviceShort(C.DEVICE_SHORT_USB_RESET_MSG)
+            raise DfuDeviceShort(C.DEVICE_SHORT_MSG)
         self._log("Validation OK.")
 
         # 6) ACTIVATE + RESET. Op 0x05 does NOT call NVIC_SystemReset() itself; the
@@ -262,7 +273,6 @@ class LegacyDfu:
         prn = self._eff_prn
         sent = 0
         pkts_since_prn = 0
-        prn_misses = 0
         first_prn = True
         last_acked = 0
         start = time.monotonic()
@@ -272,9 +282,11 @@ class LegacyDfu:
         while sent < total:
             chunk = data[sent : sent + cs]
             await self.t.write_packet(chunk)
-            # Pace EVERY packet: OTAFIX lazy-erases as data arrives into an 8-slot ring; a
-            # tight burst overruns it during a page erase and the excess is silently dropped.
-            await asyncio.sleep(C.STREAM_PACE_S)
+            # Back-pressure is the receipt gate below (we never send the next window until the
+            # device acks the current one), so no per-packet sleep is needed; STREAM_PACE_S is
+            # 0 by default. await write_packet already serializes one write at a time.
+            if C.STREAM_PACE_S:
+                await asyncio.sleep(C.STREAM_PACE_S)
             sent += len(chunk)
             pkts_since_prn += 1
 
@@ -296,38 +308,34 @@ class LegacyDfu:
                 )
                 last_log = now
 
-            # Flow control: after N packets wait for the device's byte-count report,
-            # but never wait after the final packet (the device sends the RECEIVE ack instead).
+            # Flow control (the load-bearing fix): after N packets BLOCK on the device's
+            # byte-count receipt before sending one more byte — exactly like the Nordic
+            # reference. We never speculate ahead. (No wait after the final packet — the device
+            # sends the RECEIVE ack instead.)
             if prn > 0 and pkts_since_prn >= prn and sent < total:
                 timeout = C.FIRST_PRN_TIMEOUT_S if first_prn else C.PRN_TIMEOUT_S
                 t0 = time.monotonic()
                 try:
                     acked = await self._await_prn(timeout=timeout)
-                    last_acked = acked
-                    prn_misses = 0
-                    if first_prn:
-                        self._log(
-                            f"  first packet-receipt after {time.monotonic() - t0:.1f}s "
-                            f"(device acked {acked} B of {sent} sent)"
-                        )
-                    elif self._verbose:
-                        self._log(f"  [v] receipt: device acked {acked} B (sent {sent} B)")
                 except DfuError:
-                    # Do NOT free-run: streaming past missing receipts is exactly what overruns
-                    # the bootloader's 8-slot ring during a lazy page-erase and drops data.
-                    prn_misses += 1
+                    # No receipt within the (very long) backstop while still connected → the
+                    # device is wedged. Do NOT stream the next window — sending past a missing
+                    # receipt is precisely what overruns the device during a deferred flash
+                    # erase and drops a window. Abort; the controller resets and retries.
                     self._prn_misses_total += 1
-                    self._log(
-                        f"  no packet-receipt within {time.monotonic() - t0:.0f}s "
-                        f"({'first window' if first_prn else 'mid-stream'}, "
-                        f"{prn_misses}/{C.MAX_PRN_MISSES})"
+                    raise DfuError(
+                        f"No packet-receipt for {time.monotonic() - t0:.0f}s while still "
+                        "connected — the device appears wedged. Aborting without sending the "
+                        "next window (so nothing is dropped mid-stream)."
                     )
-                    if prn_misses >= C.MAX_PRN_MISSES:
-                        raise DfuError(
-                            f"No packet-receipt for {C.MAX_PRN_MISSES} consecutive windows — the "
-                            "device is not draining (it may be overrunning during flash erase). "
-                            "Aborting before more data is lost."
-                        )
+                last_acked = acked
+                if first_prn:
+                    self._log(
+                        f"  first packet-receipt after {time.monotonic() - t0:.1f}s "
+                        f"(device acked {acked} B of {sent} sent)"
+                    )
+                elif self._verbose:
+                    self._log(f"  [v] receipt: device acked {acked} B (sent {sent} B)")
                 first_prn = False
                 pkts_since_prn = 0
 

@@ -100,9 +100,23 @@ class FlashController(QObject):
                     manual_reset = await dfu.run()
                     break
                 except DfuDeviceShort:
-                    # Image streamed fully but the device is short — data lost in transit
-                    # (legacy DFU can't retransmit). Retrying re-drops; fail fast with guidance.
-                    raise
+                    # A window was lost in transit. On a high-MTU rung, step down to the proven
+                    # smaller chunk (write-without-response fragmentation can overrun). On the
+                    # last/reliable rung, don't retry the same thing — fail fast with guidance.
+                    if i < len(rungs) - 1:
+                        try:
+                            await transport.disconnect()
+                        except Exception:
+                            pass
+                        transport = None
+                        await asyncio.sleep(2.5)
+                        self.log.emit(
+                            "Device ended a window short — stepping down to a smaller, more "
+                            "reliable chunk size..."
+                        )
+                        i += 1
+                        continue
+                    raise  # last/reliable rung → clean fail-fast handler with guidance
                 except DfuInvalidState:
                     # Bootloader wedged in a non-IDLE state (a prior transfer aborted
                     # mid-stream). Only a reset clears it — not a smaller chunk.

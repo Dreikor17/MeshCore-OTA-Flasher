@@ -58,20 +58,23 @@ after an OTA performed while on USB, and OTA is slower. You can flash OTAFIX **o
 - Keep a USB recovery path ready (double-tap reset → [flasher.meshcore.io](https://flasher.meshcore.io)).
 - **Don't** OTA-flash the bootloader on a remote node you can't physically reach.
 
-## If a flash keeps failing or resets the node
+## If a flash keeps failing or the device ends "short"
 
-**Flash on battery — unplug USB.** This is the single most reliable fix. On the nRF52840,
-erasing a flash page halts the CPU for ~85 ms; while it's halted the USB stack isn't serviced,
-so Windows **re-enumerates** the device — and that same stall drops the data in flight, leaving
-the transfer a window short (you'll hear the USB device disconnect/reconnect mid-flash). With
-**no USB cable** (battery, a charge-only cable, or a dumb wall charger) there's no host to reset
-and the transfer completes cleanly. When this happens the app now tells you so explicitly.
-*(Confirmed upstream: Adafruit bootloader issue #174 — it doesn't happen on battery power.)*
+The client follows the Nordic reference's strict flow control: after each small batch of
+packets it **waits for the device's receipt** before sending more, and waits as long as the
+device needs — the SoftDevice can pause for several seconds to erase a flash page, and that's
+normal (you'll see a brief "device busy — waiting…" note). It never streams ahead, so it won't
+overrun the bootloader. If a flash still ends short:
 
-Some BLE adapters also can't sustain the fast high-MTU transfer and will drop the link. Tick
-**"Reliable (20-byte)"** — it streams at the slow-but-solid 20-byte chunk size, paced to suit
-the bootloader's flash erases. It's remembered per machine, and bootloader flashes always use it
-automatically. *Tip: a different/better BLE adapter may unlock the faster high-MTU path.*
+- **Lower the PRN** (try 4, then 1). Smaller batches are safer on a weak link.
+- **Tick "Reliable (20-byte)"** — the slow-but-solid 20-byte chunk size. It's remembered per
+  machine, and bootloader flashes always use it automatically. Some BLE adapters can't sustain
+  the faster high-MTU path; a different/better adapter may unlock it.
+- **Save the verbose log** so the exact failure point can be pinpointed.
+
+> Separately, the **stock** "AdaDFU" bootloader can fail to auto-reboot after an OTA done while
+> on USB — flash on battery, or install OTAFIX, to avoid that. (That's a *post*-flash reboot
+> quirk, not the transfer itself.)
 
 ## Run from source
 

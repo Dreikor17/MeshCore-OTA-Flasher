@@ -72,23 +72,24 @@ MIN_CHUNK = 20  # one un-fragmented link-layer packet at the classic 23-byte ATT
 # effective PRN as round(TARGET_PRN_BYTES / chunk): ~3 at 180-byte, ~4 at 128-byte, 10 at
 # 20-byte. ~480 bytes in flight matches the proven MTU-23 case (~200) closely enough.
 TARGET_PRN_BYTES = 480
-# Per-packet pacing applied to EVERY chunk. OTAFIX lazy-erases flash page-by-page as data
-# arrives and buffers into an 8-slot ring; a tight burst overruns it during an ~85 ms page
-# erase and the excess is silently dropped. Spreading each packet by a few ms lets the ring
-# drain. (The app raises the Windows timer resolution so this small sleep is honored.)
-STREAM_PACE_S = 0.003
-# Abort after this many consecutive missed receipts — a real sign the device is overrunning;
-# continuing past it would only lose more data (do NOT free-run).
-MAX_PRN_MISSES = 3
+# No inter-packet pacing: the Nordic reference client uses no delay (dataObjectDelay = 0). All
+# back-pressure comes from awaiting each write AND the packet-receipt gate (we never send the
+# next window until the device's receipt for the current one arrives), so a per-packet sleep
+# adds nothing but slowness. Kept as a tunable knob (0 = off); set >0 only to experiment.
+STREAM_PACE_S = 0.0
+# A missed receipt is FATAL on the first miss: we must never stream the next window without the
+# current window's receipt (that is what overruns the device during a deferred flash erase).
+MAX_PRN_MISSES = 1
 # Settle time after a SYS_RESET (0x06) recovery before rescanning for the rebooted bootloader.
 SYS_RESET_SETTLE_S = 3.0
-# Timeout for the FIRST packet-receipt. With paced sending the device only erases page 0 before
-# the START ack, so the first receipt should land in ~1-2 s; 10 s is generous headroom and a
-# late one now means trouble (we abort after MAX_PRN_MISSES), not "keep streaming".
-FIRST_PRN_TIMEOUT_S = 10.0
-# Timeout for subsequent receipts during steady streaming (normally arrive in well under 1 s).
-PRN_TIMEOUT_S = 8.0
-# START_DFU ack can take a moment (page-0 erase + MTU settle); give it room.
+# Receipt-wait backstop. The Nordic reference waits for each packet-receipt INDEFINITELY (only a
+# disconnect unblocks it) — the SoftDevice legitimately defers a flash erase several seconds
+# behind radio events, withholding the receipt. We mirror that with a very generous ceiling that
+# only fires on a truly wedged-but-connected device; a real disconnect still aborts instantly.
+# We must NEVER send the next window before this receipt arrives (that overruns the device).
+FIRST_PRN_TIMEOUT_S = 60.0
+PRN_TIMEOUT_S = 60.0
+# START_DFU ack can take a while (the bootloader may erase flash before acking); give it room.
 START_DFU_TIMEOUT_S = 60.0
 
 # Advertised-name hints used to classify scan results.
@@ -126,18 +127,15 @@ BOOTLOADER_FLASHED_MSG = (
     "CLI) to bring back its identity."
 )
 
-DEVICE_SHORT_USB_RESET_MSG = (
-    "The whole image streamed, but the device reports it is SHORT — it lost data mid-transfer "
-    "(legacy DFU can't retransmit, so the flash can't complete and the old firmware is "
-    "untouched).\n\n"
-    "On the nRF52840 this is almost always a USB RE-ENUMERATION during a flash erase: erasing "
-    "a flash page halts the CPU for ~85 ms, which starves the USB stack so Windows resets the "
-    "device — and the same stall drops the BLE window in flight.\n\n"
-    "FIX: if the node is plugged into USB, UNPLUG it and flash on battery (a charge-only cable "
-    "or a dumb USB charger also works — the point is no data host). On battery there is no USB "
-    "to reset and the transfer completes. (Confirmed by Adafruit bootloader issue #174: this "
-    "does not happen on battery power.)\n\n"
-    "If you were already on battery, just retry; if it persists, save the log and lower PRN."
+DEVICE_SHORT_MSG = (
+    "The whole image streamed, but the device reports it is SHORT — a window was lost in "
+    "transit. Legacy DFU can't retransmit a lost window, so the flash can't complete (the old "
+    "firmware is untouched).\n\n"
+    "The client now waits for every packet-receipt before sending more, so this should be "
+    "rare. Try flashing again. If it keeps happening:\n"
+    "  • Lower the PRN setting (try 4, then 1) — smaller windows are safer on a slow link.\n"
+    "  • Tick 'Reliable (20-byte)' if it isn't already.\n"
+    "  • Save the verbose log so the exact failure point can be pinpointed."
 )
 
 STOCK_BOOTLOADER_HANG_MSG = (
