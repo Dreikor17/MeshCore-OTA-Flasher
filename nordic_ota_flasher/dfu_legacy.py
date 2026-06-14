@@ -43,6 +43,7 @@ class LegacyDfu:
         prn: int = C.DEFAULT_PRN,
         log=None,
         progress=None,
+        verbose: bool = False,
     ):
         self.t = transport
         self.img = image
@@ -50,6 +51,7 @@ class LegacyDfu:
         self._log = log or (lambda *_: None)
         # progress(sent: int, total: int, bits_per_sec: float)
         self._progress = progress or (lambda *_: None)
+        self._verbose = verbose
         self._unknown_logged = 0
         self._eff_prn = 0
         # populated by _stream_firmware for the post-flash summary
@@ -234,10 +236,11 @@ class LegacyDfu:
         pace = cs > C.MIN_CHUNK  # light throttle on the high-MTU (fragmenting) path only
         sent = 0
         pkts_since_prn = 0
-        prn_misses = 0
         first_prn = True
+        last_acked = 0
         start = time.monotonic()
         last_emit = 0.0
+        last_log = start
 
         while sent < total:
             chunk = data[sent : sent + cs]
@@ -254,37 +257,48 @@ class LegacyDfu:
                 self._progress(sent, total, bps)
                 last_emit = now
 
+            # Periodic timestamped progress to the log so a stall is visible, and so we can see
+            # whether the device's acked count keeps pace with what we've sent (loss diagnosis).
+            if now - last_log >= 5.0:
+                el = now - start
+                kib = (sent / 1024 / el) if el > 0 else 0.0
+                self._log(
+                    f"  …streaming {sent * 100 // total}% — {sent}/{total} B, "
+                    f"{kib:.1f} KiB/s, device acked {last_acked} B"
+                )
+                last_log = now
+
             # Flow control: after N packets wait for the device's byte-count report,
             # but never wait after the final packet (the device sends the RECEIVE ack instead).
             if prn > 0 and pkts_since_prn >= prn and sent < total:
-                # The first receipt can be tens of seconds out (initial flash erase); wait it
-                # out so we don't push the next window into a full buffer mid-erase.
-                prn_timeout = C.FIRST_PRN_TIMEOUT_S if first_prn else 30.0
-                first_prn = False
+                timeout = C.FIRST_PRN_TIMEOUT_S if first_prn else C.PRN_TIMEOUT_S
+                t0 = time.monotonic()
                 try:
-                    acked = await self._await_prn(timeout=prn_timeout)
-                    prn_misses = 0
-                    if acked != sent and self._unknown_logged < 8:
-                        # Don't abort — the device may count differently; VALIDATE's CRC16
-                        # is the authoritative integrity check. Just surface it (capped).
-                        self._unknown_logged += 1
+                    acked = await self._await_prn(timeout=timeout)
+                    last_acked = acked
+                    if first_prn:
                         self._log(
-                            f"  [debug] PRN count: device acked {acked}, sent {sent} "
-                            "(continuing; VALIDATE verifies the CRC)."
+                            f"  first packet-receipt after {time.monotonic() - t0:.1f}s "
+                            f"(device acked {acked} B of {sent} sent)"
                         )
+                    elif self._verbose:
+                        self._log(f"  [v] receipt: device acked {acked} B (sent {sent} B)")
                 except DfuError:
-                    # Tolerate a transient missed receipt; only abort after several in a row.
-                    prn_misses += 1
-                    if prn_misses >= C.MAX_PRN_MISSES:
-                        raise
+                    # A lost/late receipt is NOT fatal — notifications can drop on a flaky link
+                    # while the data still arrives; VALIDATE's CRC is the authoritative gate.
                     self._log(
-                        f"  [debug] missed packet-receipt ({prn_misses}/{C.MAX_PRN_MISSES}) "
-                        "— continuing (VALIDATE will verify the CRC)."
+                        f"  no packet-receipt within {time.monotonic() - t0:.0f}s "
+                        f"({'first window' if first_prn else 'mid-stream'}) — continuing."
                     )
+                first_prn = False
                 pkts_since_prn = 0
 
         self.transfer_bytes = sent
         self.transfer_seconds = max(time.monotonic() - start, 1e-6)
+        self._log(
+            f"Stream finished: {sent} B in {self.transfer_seconds:.1f}s "
+            f"({self.avg_bps / 8 / 1024:.1f} KiB/s); device last acked {last_acked} B"
+        )
 
     async def _wait_for_disconnect(self, timeout: float) -> bool:
         """Wait for the peer-initiated link drop after ACTIVATE.

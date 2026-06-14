@@ -6,6 +6,7 @@ import asyncio
 import os
 import sys
 import time
+from datetime import datetime
 
 from PySide6.QtCore import Qt, QTimer, QSettings
 from PySide6.QtGui import QFont
@@ -210,6 +211,9 @@ class MainWindow(QWidget):
             "(some adapters can't sustain high-MTU writes). Slower (~5 KiB/s) but rock-solid."
         )
         opt_row.addWidget(self.reliable_check)
+        self.verbose_check = QCheckBox("Verbose log")
+        self.verbose_check.setToolTip("Log every packet-receipt and extra timing detail for debugging.")
+        opt_row.addWidget(self.verbose_check)
         opt_row.addWidget(QLabel("PRN:"))
         self.prn_spin = QSpinBox()
         self.prn_spin.setRange(0, 100)
@@ -252,9 +256,19 @@ class MainWindow(QWidget):
         root.addWidget(flash_box)
 
         # --- Log ---
+        log_hdr = QHBoxLayout()
+        log_hdr.addWidget(QLabel("Log"))
+        log_hdr.addStretch(1)
+        self.save_log_btn = QPushButton("Save log…")
+        self.save_log_btn.clicked.connect(self.on_save_log)
+        log_hdr.addWidget(self.save_log_btn)
+        self.clear_log_btn = QPushButton("Clear")
+        self.clear_log_btn.clicked.connect(lambda: self.log_view.clear())
+        log_hdr.addWidget(self.clear_log_btn)
+        root.addLayout(log_hdr)
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
-        self.log_view.setMaximumBlockCount(2000)
+        self.log_view.setMaximumBlockCount(20000)
         mono = QFont("Consolas")
         mono.setStyleHint(QFont.StyleHint.Monospace)
         self.log_view.setFont(mono)
@@ -280,7 +294,21 @@ class MainWindow(QWidget):
         )
 
     def _log(self, text: str) -> None:
-        self.log_view.appendPlainText(text)
+        self.log_view.appendPlainText(f"{datetime.now().strftime('%H:%M:%S.%f')[:-3]}  {text}")
+
+    def on_save_log(self) -> None:
+        default = os.path.join(
+            os.getcwd(), f"meshcore-flash-log-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
+        )
+        path, _ = QFileDialog.getSaveFileName(self, "Save log", default, "Text files (*.txt)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.log_view.toPlainText())
+            self._log(f"Log saved to {path}")
+        except Exception as e:  # noqa: BLE001
+            self._log(f"Could not save log: {e}")
 
     # ----------------------------------------------------- live signal meter
     def _request_rssi_scanning(self, active: bool) -> None:
@@ -587,6 +615,7 @@ class MainWindow(QWidget):
             self.skip_trigger.isChecked(),
             self.prn_spin.value(),
             reliable=self.reliable_check.isChecked(),
+            verbose=self.verbose_check.isChecked(),
         )
 
     # ----------------------------------------------------------- signals

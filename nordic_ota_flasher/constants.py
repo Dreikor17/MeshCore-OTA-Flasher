@@ -76,10 +76,12 @@ HIGH_MTU_PACE_S = 0.002
 MAX_PRN_MISSES = 3
 # Settle time after a SYS_RESET (0x06) recovery before rescanning for the rebooted bootloader.
 SYS_RESET_SETTLE_S = 3.0
-# The FIRST packet-receipt can be VERY late: an SD+BL (or large app) image makes the bootloader
-# erase a big flash region on the opening write — tens of seconds during which it can't ack.
-# Wait it out (don't push the next window into a full buffer mid-erase, which drops it).
-FIRST_PRN_TIMEOUT_S = 120.0
+# Timeout for the FIRST packet-receipt (the bootloader may be erasing flash before it can ack).
+# Kept modest so a lost first receipt doesn't stall the UI for minutes — VALIDATE's CRC is the
+# real completion gate, and we log how long it actually took (see verbose timing).
+FIRST_PRN_TIMEOUT_S = 40.0
+# Timeout for subsequent receipts during steady streaming (normally arrive in well under 1 s).
+PRN_TIMEOUT_S = 15.0
 
 # Advertised-name hints used to classify scan results.
 OTA_NAME_HINT  = "_OTA"          # app-mode after `start ota` (e.g. RAK4631_OTA)

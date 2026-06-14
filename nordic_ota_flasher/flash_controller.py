@@ -35,6 +35,7 @@ class FlashController(QObject):
         skip_trigger: bool,
         prn: int,
         reliable: bool = False,
+        verbose: bool = False,
     ) -> None:
         transport: BleTransport | None = None
         t0 = time.monotonic()
@@ -93,6 +94,7 @@ class FlashController(QObject):
                     prn=prn,
                     log=self.log.emit,
                     progress=lambda s, t, b: self.progress.emit(s, t, b),
+                    verbose=verbose,
                 )
                 try:
                     manual_reset = await dfu.run()
