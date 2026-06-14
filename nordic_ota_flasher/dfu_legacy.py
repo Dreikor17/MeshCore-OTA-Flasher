@@ -282,9 +282,10 @@ class LegacyDfu:
         while sent < total:
             chunk = data[sent : sent + cs]
             await self.t.write_packet(chunk)
-            # Back-pressure is the receipt gate below (we never send the next window until the
-            # device acks the current one), so no per-packet sleep is needed; STREAM_PACE_S is
-            # 0 by default. await write_packet already serializes one write at a time.
+            # Pace each packet: on WinRT an awaited write-without-response only QUEUES (it does
+            # not wait for delivery), so an un-paced window is one un-flow-controlled burst that
+            # overruns the device's RX and its receipt never comes. This spreads the burst; the
+            # receipt gate below is the higher-level, per-window flow control.
             if C.STREAM_PACE_S:
                 await asyncio.sleep(C.STREAM_PACE_S)
             sent += len(chunk)

@@ -72,11 +72,15 @@ MIN_CHUNK = 20  # one un-fragmented link-layer packet at the classic 23-byte ATT
 # effective PRN as round(TARGET_PRN_BYTES / chunk): ~3 at 180-byte, ~4 at 128-byte, 10 at
 # 20-byte. ~480 bytes in flight matches the proven MTU-23 case (~200) closely enough.
 TARGET_PRN_BYTES = 480
-# No inter-packet pacing: the Nordic reference client uses no delay (dataObjectDelay = 0). All
-# back-pressure comes from awaiting each write AND the packet-receipt gate (we never send the
-# next window until the device's receipt for the current one arrives), so a per-packet sleep
-# adds nothing but slowness. Kept as a tunable knob (0 = off); set >0 only to experiment.
-STREAM_PACE_S = 0.0
+# Per-packet pacing (seconds). REQUIRED on Windows/WinRT. The Nordic Android reference uses no
+# delay because its onCharacteristicWrite callback waits for each write-without-response to be
+# CONFIRMED (one in flight). bleak/WinRT's awaited write-without-response only QUEUES the packet
+# — it does not wait for delivery — so an un-paced window goes out as one un-flow-controlled
+# link-layer burst that overruns the device's RX (worst at connect time): packets are dropped,
+# the PRN count never reaches the window size, and the device never sends the receipt — the
+# transfer stalls with no first receipt. A few ms per packet spreads the burst so all of a
+# window arrives. (__main__ raises the Windows timer resolution so this small sleep is honored.)
+STREAM_PACE_S = 0.003
 # A missed receipt is FATAL on the first miss: we must never stream the next window without the
 # current window's receipt (that is what overruns the device during a deferred flash erase).
 MAX_PRN_MISSES = 1
