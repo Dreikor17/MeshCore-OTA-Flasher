@@ -191,13 +191,23 @@ class LegacyDfu:
         self._log("Streaming firmware image...")
         await self.t.write_ctrl(bytes([C.OP_RECEIVE_FW]))
         await self._stream_firmware()
-        # If a window was lost (device short), this ack never comes — fail in 30 s so the
-        # controller's reliable-rung retry can take a fresh shot, rather than waiting 60 s.
-        await self._await_response(C.OP_RECEIVE_FW, timeout=30.0)
-        self._log("Firmware image received by device.")
+        # The "image received" handshake can be missed even when the device actually got the
+        # whole image (packet-receipt notification lag desyncs us by a window). So DON'T treat
+        # a missing ack as fatal — fall through to VALIDATE, whose CRC16 is the authoritative
+        # test of a complete, correct image. If the device really is short, VALIDATE fails
+        # (CRC_ERROR) or rejects (INVALID_STATE) and the controller retries — still safe.
+        try:
+            await self._await_response(C.OP_RECEIVE_FW, timeout=15.0)
+            self._log("Firmware image received by device.")
+        except DfuError:
+            self._log(
+                "No 'image received' ack in 15 s — the device likely has it anyway "
+                "(notification lag). Probing with VALIDATE; its CRC is the real test."
+            )
 
-        # 5) VALIDATE (CRC16 over received image vs the .dat trailer)
+        # 5) VALIDATE (CRC16 over received image vs the .dat trailer) — the authoritative gate
         self._log("Validating image (CRC16)...")
+        self.t.drain()  # clear any backlogged/late notifications so the ack reads clean
         await self.t.write_ctrl(bytes([C.OP_VALIDATE]))
         await self._await_response(C.OP_VALIDATE)
         self._log("Validation OK.")
