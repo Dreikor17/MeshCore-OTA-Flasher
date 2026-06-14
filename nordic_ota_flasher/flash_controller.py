@@ -17,7 +17,7 @@ from PySide6.QtCore import QObject, Signal
 from . import buttonless
 from . import constants as C
 from .ble_transport import BleDisconnected, BleTransport, get_adapter_names
-from .dfu_legacy import DfuError, DfuInvalidState, LegacyDfu
+from .dfu_legacy import DfuDeviceShort, DfuError, DfuInvalidState, LegacyDfu
 from .dfu_package import DfuImage
 from .scanner import FoundDevice
 
@@ -99,6 +99,10 @@ class FlashController(QObject):
                 try:
                     manual_reset = await dfu.run()
                     break
+                except DfuDeviceShort:
+                    # Image streamed fully but the device is short — data lost in transit
+                    # (legacy DFU can't retransmit). Retrying re-drops; fail fast with guidance.
+                    raise
                 except DfuInvalidState:
                     # Bootloader wedged in a non-IDLE state (a prior transfer aborted
                     # mid-stream). Only a reset clears it — not a smaller chunk.
@@ -164,6 +168,11 @@ class FlashController(QObject):
                 self.finished.emit(
                     True, "Firmware flashed and validated — the device is rebooting into it."
                 )
+        except DfuDeviceShort as e:
+            # Streamed fully but the device is short — surface the actionable battery guidance
+            # cleanly (no exception-type prefix) instead of a cryptic INVALID_STATE.
+            self.phase.emit("Failed")
+            self.finished.emit(False, str(e))
         except BleDisconnected as e:
             # Only escapes from a pre-ACTIVATE phase, so the old image is untouched.
             self.phase.emit("Failed")

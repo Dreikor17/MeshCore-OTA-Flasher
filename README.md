@@ -60,14 +60,18 @@ after an OTA performed while on USB, and OTA is slower. You can flash OTAFIX **o
 
 ## If a flash keeps failing or resets the node
 
-Some BLE adapters can't sustain the fast high-MTU transfer and will drop the link or reset the
-node early in a flash. Tick **"Reliable (20-byte)"** — it streams at the slow-but-solid 20-byte
-chunk size (~5 KiB/s, a ~500 KB app in ~100 s). It's remembered per machine, and bootloader
-flashes always use it automatically. *Tip: a different/better BLE adapter may unlock the ~10×
-faster high-MTU path.*
+**Flash on battery — unplug USB.** This is the single most reliable fix. On the nRF52840,
+erasing a flash page halts the CPU for ~85 ms; while it's halted the USB stack isn't serviced,
+so Windows **re-enumerates** the device — and that same stall drops the data in flight, leaving
+the transfer a window short (you'll hear the USB device disconnect/reconnect mid-flash). With
+**no USB cable** (battery, a charge-only cable, or a dumb wall charger) there's no host to reset
+and the transfer completes cleanly. When this happens the app now tells you so explicitly.
+*(Confirmed upstream: Adafruit bootloader issue #174 — it doesn't happen on battery power.)*
 
-A long pause with no progress at the start of a bootloader/large flash is **normal** — the
-bootloader is erasing flash before it can accept data.
+Some BLE adapters also can't sustain the fast high-MTU transfer and will drop the link. Tick
+**"Reliable (20-byte)"** — it streams at the slow-but-solid 20-byte chunk size, paced to suit
+the bootloader's flash erases. It's remembered per machine, and bootloader flashes always use it
+automatically. *Tip: a different/better BLE adapter may unlock the faster high-MTU path.*
 
 ## Run from source
 

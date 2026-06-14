@@ -35,6 +35,12 @@ class DfuInvalidState(DfuError):
     in a non-IDLE state (e.g. a prior transfer aborted mid-stream). Recover with SYS_RESET."""
 
 
+class DfuDeviceShort(DfuError):
+    """The whole image streamed but VALIDATE shows the device never reached "received-all" —
+    data was lost in transit. Legacy DFU can't retransmit, so retrying the same way just
+    re-drops; the fix is environmental (flash on battery — see DEVICE_SHORT_USB_RESET_MSG)."""
+
+
 class LegacyDfu:
     def __init__(
         self,
@@ -54,6 +60,7 @@ class LegacyDfu:
         self._verbose = verbose
         self._unknown_logged = 0
         self._eff_prn = 0
+        self._prn_misses_total = 0  # cumulative multi-second receipt stalls (USB-reset tell)
         # populated by _stream_firmware for the post-flash summary
         self.transfer_bytes = 0
         self.transfer_seconds = 0.0
@@ -205,15 +212,33 @@ class LegacyDfu:
             self._log("Firmware image received by device.")
         except DfuError:
             self._log(
-                "No 'image received' ack in 15 s — the device likely has it anyway "
-                "(notification lag). Probing with VALIDATE; its CRC is the real test."
+                "No 'image received' ack — the device may have it anyway (notification lag). "
+                "Probing with VALIDATE; its CRC is the authoritative completion test."
             )
 
         # 5) VALIDATE (CRC16 over received image vs the .dat trailer) — the authoritative gate
         self._log("Validating image (CRC16)...")
         self.t.drain()  # clear any backlogged/late notifications so the ack reads clean
         await self.t.write_ctrl(bytes([C.OP_VALIDATE]))
-        await self._await_response(C.OP_VALIDATE)
+        try:
+            await self._await_response(C.OP_VALIDATE)
+        except DfuInvalidState:
+            # VALIDATE is "invalid" only because the device never reached "received-all" — it
+            # is SHORT. We streamed the whole image, so a window was lost in transit (on the
+            # nRF52840 almost always a USB re-enumeration during a flash erase). A reset+retry
+            # just re-drops, so clear the wedged state and fail fast with actionable guidance.
+            short_note = ""
+            if self._prn_misses_total:
+                short_note = (
+                    f" (a {self._prn_misses_total}× multi-second packet-receipt stall was "
+                    "seen during the transfer — the signature of that USB reset)"
+                )
+            self._log("Device reports the image is SHORT — data was lost in transit" + short_note + ".")
+            try:
+                await self.send_sys_reset()  # reboot to a clean OTA-DFU state for the next attempt
+            except Exception:  # noqa: BLE001
+                pass
+            raise DfuDeviceShort(C.DEVICE_SHORT_USB_RESET_MSG)
         self._log("Validation OK.")
 
         # 6) ACTIVATE + RESET. Op 0x05 does NOT call NVIC_SystemReset() itself; the
@@ -291,6 +316,7 @@ class LegacyDfu:
                     # Do NOT free-run: streaming past missing receipts is exactly what overruns
                     # the bootloader's 8-slot ring during a lazy page-erase and drops data.
                     prn_misses += 1
+                    self._prn_misses_total += 1
                     self._log(
                         f"  no packet-receipt within {time.monotonic() - t0:.0f}s "
                         f"({'first window' if first_prn else 'mid-stream'}, "

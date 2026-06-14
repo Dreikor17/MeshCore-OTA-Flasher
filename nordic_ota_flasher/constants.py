@@ -126,6 +126,20 @@ BOOTLOADER_FLASHED_MSG = (
     "CLI) to bring back its identity."
 )
 
+DEVICE_SHORT_USB_RESET_MSG = (
+    "The whole image streamed, but the device reports it is SHORT — it lost data mid-transfer "
+    "(legacy DFU can't retransmit, so the flash can't complete and the old firmware is "
+    "untouched).\n\n"
+    "On the nRF52840 this is almost always a USB RE-ENUMERATION during a flash erase: erasing "
+    "a flash page halts the CPU for ~85 ms, which starves the USB stack so Windows resets the "
+    "device — and the same stall drops the BLE window in flight.\n\n"
+    "FIX: if the node is plugged into USB, UNPLUG it and flash on battery (a charge-only cable "
+    "or a dumb USB charger also works — the point is no data host). On battery there is no USB "
+    "to reset and the transfer completes. (Confirmed by Adafruit bootloader issue #174: this "
+    "does not happen on battery power.)\n\n"
+    "If you were already on battery, just retry; if it persists, save the log and lower PRN."
+)
+
 STOCK_BOOTLOADER_HANG_MSG = (
     "Image flashed and validated OK — but the node did not auto-reboot. This is the known "
     "stock 'AdaDFU' bootloader USB hang: it doesn't release USB before booting the app, so "
