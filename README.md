@@ -12,7 +12,7 @@ Nordic DFU protocol used by the Adafruit nRF52 bootloader and the
 
 ## Download
 
-Grab **`MeshCore-OTA-Flasher-v0.2.0.exe`** from the
+Grab **`MeshCore-OTA-Flasher-v0.2.2.exe`** from the
 [**latest release**](https://github.com/Dreikor17/MeshCore-OTA-Flasher/releases/latest) — a
 single self-contained file, no install needed. Just run it.
 
@@ -103,6 +103,16 @@ unused Qt modules).
 - For clean, unattended OTAs, run the OTAFIX bootloader and keep a USB recovery path handy.
 
 ## Releases / Changelog
+
+### v0.2.2
+Patch — fixes a flash stall introduced in v0.2.0.
+- **Fixed the PRN default.** The packet-receipt interval is now capped to fit the bootloader's
+  ~8-packet receive buffer (default 4, max 6). v0.2.0 defaulted to 10, which could overrun the
+  buffer and leave the device silent on the first packet (no receipt). It's the packet *count*,
+  not size, so it affected every chunk size.
+- ACTIVATE now tolerates the device dropping the link as it reboots — no more spurious
+  `ERROR_CANCELLED` on an otherwise-successful flash.
+- The "use downloaded" dropdown defaults to a blank selection.
 
 ### v0.2.0
 Reliability release — OTA now completes end-to-end on RAK4631 / nRF52840 (firmware **and** the
