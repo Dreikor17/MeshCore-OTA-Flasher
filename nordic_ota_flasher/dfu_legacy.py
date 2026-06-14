@@ -318,15 +318,16 @@ class LegacyDfu:
                 try:
                     acked = await self._await_prn(timeout=timeout)
                 except DfuError:
-                    # No receipt within the (very long) backstop while still connected → the
-                    # device is wedged. Do NOT stream the next window — sending past a missing
-                    # receipt is precisely what overruns the device during a deferred flash
-                    # erase and drops a window. Abort; the controller resets and retries.
+                    # No receipt within the backstop while still connected → the device is
+                    # wedged (a fresh START can "succeed" yet never ack data when the bootloader
+                    # was left non-IDLE by a prior aborted transfer; resetting clears it). Do NOT
+                    # stream the next window. Signal a wedged state so the controller does a
+                    # SYS_RESET + reconnect + retry — a smaller chunk would not unwedge it.
                     self._prn_misses_total += 1
-                    raise DfuError(
-                        f"No packet-receipt for {time.monotonic() - t0:.0f}s while still "
-                        "connected — the device appears wedged. Aborting without sending the "
-                        "next window (so nothing is dropped mid-stream)."
+                    where = "first data window" if first_prn else "mid-stream"
+                    raise DfuInvalidState(
+                        f"Device sent no packet-receipt for {time.monotonic() - t0:.0f}s "
+                        f"({where}) while still connected — it appears wedged."
                     )
                 last_acked = acked
                 if first_prn:

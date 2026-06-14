@@ -82,12 +82,15 @@ STREAM_PACE_S = 0.0
 MAX_PRN_MISSES = 1
 # Settle time after a SYS_RESET (0x06) recovery before rescanning for the rebooted bootloader.
 SYS_RESET_SETTLE_S = 3.0
-# Receipt-wait backstop. The Nordic reference waits for each packet-receipt INDEFINITELY (only a
-# disconnect unblocks it) — the SoftDevice legitimately defers a flash erase several seconds
-# behind radio events, withholding the receipt. We mirror that with a very generous ceiling that
-# only fires on a truly wedged-but-connected device; a real disconnect still aborts instantly.
-# We must NEVER send the next window before this receipt arrives (that overruns the device).
-FIRST_PRN_TIMEOUT_S = 60.0
+# Receipt-wait backstops. We must NEVER send the next window before its receipt arrives (that
+# overruns the device), so on a timeout we abort + reset rather than stream on.
+#   FIRST window: a healthy bootloader acks the first window in ~0 s, so a long silence here
+#   means it is WEDGED (commonly left non-IDLE by a prior aborted transfer) — detect that fast
+#   and reset, don't wait a full minute.
+#   MID-STREAM: the SoftDevice can defer a flash erase several seconds behind radio events and
+#   legitimately withhold the receipt, so be patient (mirror the Nordic reference's long wait).
+# A real disconnect aborts instantly in both cases (BleDisconnected wakes next_notification).
+FIRST_PRN_TIMEOUT_S = 15.0
 PRN_TIMEOUT_S = 60.0
 # START_DFU ack can take a while (the bootloader may erase flash before acking); give it room.
 START_DFU_TIMEOUT_S = 60.0
