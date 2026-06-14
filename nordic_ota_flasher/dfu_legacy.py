@@ -260,10 +260,27 @@ class LegacyDfu:
         # bootloader requests a peer disconnect and the app-jump happens as the DFU loop
         # unwinds. A clean reboot drops the link in ~1-3 s, so 10 s is ample.
         self._log("Activating new image and resetting...")
-        await self.t.write_ctrl(bytes([C.OP_ACTIVATE_RESET]))
+        activate_clean = True
+        try:
+            await self.t.write_ctrl(bytes([C.OP_ACTIVATE_RESET]))
+        except Exception as e:  # noqa: BLE001 - ACTIVATE reboots the device; it commonly drops
+            # the link before acking the write (WinRT then raises ERROR_CANCELLED / -2147023673).
+            # That is the reset, not a failure — the image already passed VALIDATE.
+            activate_clean = False
+            self._log(f"(activate write returned '{e}' — the device is resetting, expected)")
         dropped = await self._wait_for_disconnect(timeout=10.0)
         if dropped:
-            self._log("Device dropped the link — rebooting into the new firmware.")
+            if activate_clean:
+                self._log("Device dropped the link — rebooting into the new firmware.")
+            else:
+                # The link dropped during the activate handshake, so the bootloader may have
+                # reset before committing the new image as bootable — it can come back in DFU
+                # mode. The image is valid; flashing again finishes it.
+                self._log(
+                    "Device reset during activation. The image passed validation — if it comes "
+                    "back in DFU mode instead of the new firmware, the reset interrupted the "
+                    "final commit; just flash again to finish."
+                )
             return False
         # No peer disconnect: image is committed (VALIDATE passed) but the device did not
         # auto-reboot — the stock 'AdaDFU' bootloader USB hang. Report success + manual kick.
