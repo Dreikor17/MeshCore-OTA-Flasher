@@ -40,7 +40,6 @@ class FlashController(QObject):
         image: DfuImage,
         skip_trigger: bool,
         prn: int,
-        reliable: bool = False,
         verbose: bool = False,
     ) -> None:
         transport: BleTransport | None = None
@@ -71,14 +70,10 @@ class FlashController(QObject):
                 self.log.emit(f"Device is already in DFU/bootloader mode: {device.name}")
 
             # Chunk ladder: full MTU-3 (244 B — exactly what the Nordic Android client sends; it
-            # FILLS the bootloader's MTU-sized RX buffer blocks) first, then progressively
-            # smaller. Each rung is a full reconnect + fresh START_DFU. The 20-byte rung is a
-            # slow LAST RESORT (it drops to PRN=1 so it can't exhaust the buffer pool — 20-byte
-            # is the geometry that made this bootloader go silent). "Reliable" simply omits it.
-            if image.is_bootloader and not reliable:
-                reliable = True
-                self.log.emit("Bootloader package — skipping the slow 20-byte last-resort rung.")
-            rungs = [None, 128] if reliable else [None, 128, C.MIN_CHUNK]
+            # FILLS the bootloader's MTU-sized RX buffer blocks) first, then 128 B as a fallback
+            # for an adapter that can't sustain the full size. Each rung is a full reconnect +
+            # fresh START_DFU.
+            rungs = [None, 128]
             max_last_rung_tries = 3  # retry the reliable rung on transient failures
             last_rung_tries = 0
             max_resets = 4  # each failed attempt wedges the state; allow a reset per retry

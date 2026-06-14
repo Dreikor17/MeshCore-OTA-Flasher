@@ -1,3 +1,3 @@
 """Nordic nRF52 BLE OTA flasher for MeshCore (RAK4631 / Adafruit + OTAFIX bootloader)."""
 
-__version__ = "0.1.2-dev"
+__version__ = "0.1.3-dev"

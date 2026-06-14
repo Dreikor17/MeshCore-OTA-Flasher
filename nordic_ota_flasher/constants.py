@@ -55,10 +55,9 @@ RESP_NAMES = {
 # The bootloader HARD-REQUIRES the .dat device_type to equal this (else NRF_ERROR_FORBIDDEN).
 ADAFRUIT_DEVICE_TYPE = 0x0052  # 82
 
-# Packet-receipt-notification interval (packets between flow-control receipts). OTAFIX's
-# README recommends 8; with the 240 B accumulator a window then stays at/under the 8-slot
-# pstorage ring so one lazy page-erase can absorb a full window without dropping data.
-DEFAULT_PRN = 8
+# Packet-receipt-notification interval (packets between flow-control receipts). 10 is the
+# Nordic/legacy standard (the bootloader clamps PRN to 1..10; >10 -> OPERATION_FAILED).
+DEFAULT_PRN = 10
 
 # Firmware chunk = MTU-3 (244 at the negotiated 247). The Nordic Android DFU client streams
 # firmware at MTU-3 too (it grows its send buffer to mtu-3 once MTU is negotiated), which FILLS
@@ -71,11 +70,6 @@ DEFAULT_PRN = 8
 MAX_CHUNK = 244
 MIN_CHUNK = 20  # one un-fragmented packet at ATT MTU 23 — the slow fallback geometry
 
-# write-without-response has no over-air back-pressure, and PRN counts PACKETS (not bytes),
-# so the per-receipt byte budget must be held roughly constant regardless of MTU. Derive the
-# effective PRN as round(TARGET_PRN_BYTES / chunk): ~3 at 180-byte, ~4 at 128-byte, 10 at
-# 20-byte. ~480 bytes in flight matches the proven MTU-23 case (~200) closely enough.
-TARGET_PRN_BYTES = 480
 # Per-packet pacing (seconds). REQUIRED on Windows/WinRT. The Nordic Android reference uses no
 # delay because its onCharacteristicWrite callback waits for each write-without-response to be
 # CONFIRMED (one in flight). bleak/WinRT's awaited write-without-response only QUEUES the packet
@@ -144,8 +138,7 @@ DEVICE_SHORT_MSG = (
     "firmware is untouched).\n\n"
     "The client now waits for every packet-receipt before sending more, so this should be "
     "rare. Try flashing again. If it keeps happening:\n"
-    "  • Lower the PRN setting (try 4, then 1) — smaller windows are safer on a slow link.\n"
-    "  • Tick 'Reliable (20-byte)' if it isn't already.\n"
+    "  • Lower the PRN setting (try 6, then 4) — smaller windows are safer on a slow link.\n"
     "  • Save the verbose log so the exact failure point can be pinpointed."
 )
 

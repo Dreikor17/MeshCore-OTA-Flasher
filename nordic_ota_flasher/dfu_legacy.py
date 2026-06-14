@@ -73,16 +73,11 @@ class LegacyDfu:
         self.transfer_seconds = 0.0
 
     def _effective_prn(self, cs: int) -> int:
-        """Effective packet-receipt interval = writes-per-window. The bootloader allocates one
-        MTU-sized RX block PER Packet write from a small (~8-block) pool, so we must keep the
-        writes in flight per window well under that pool or it exhausts and goes silent. At the
-        MTU-3 (244 B) chunk the byte budget yields ~2; on the 20-byte fallback use 1 (one block
-        at a time, so the pool always drains to flash first) — the OTAFIX 'try PRN 1' guidance."""
+        """Effective packet-receipt interval (writes per flow-control window). Legacy bootloaders
+        clamp PRN to 1..10 (>10 -> OPERATION_FAILED), so honor the user's value up to 10."""
         if self.prn <= 0:
             return 0
-        if cs <= C.MIN_CHUNK:
-            return 1
-        return max(1, min(self.prn, round(C.TARGET_PRN_BYTES / cs)))
+        return max(1, min(self.prn, 10))
 
     @property
     def avg_bps(self) -> float:

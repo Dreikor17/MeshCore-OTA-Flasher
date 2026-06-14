@@ -81,13 +81,7 @@ class MainWindow(QWidget):
         self._rssi_timer.timeout.connect(self._refresh_rssi_label)
         self._rssi_timer.start()
         self._refresh_downloaded()
-        # Persist the checkbox. New key (the old "reliable_transfer=20-byte" meaning is gone),
-        # so it defaults UNticked → the full ladder (244 → 128 → 20) is tried on every flash.
         self._settings = QSettings("RFLab.io", "Nordic OTA Flasher")
-        self.reliable_check.setChecked(self._settings.value("skip_20byte_fallback", False, type=bool))
-        self.reliable_check.toggled.connect(
-            lambda v: self._settings.setValue("skip_20byte_fallback", v)
-        )
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
@@ -205,14 +199,6 @@ class MainWindow(QWidget):
         self.skip_trigger = QCheckBox("Device already in DFU/bootloader mode (skip 'start ota' trigger)")
         opt_row.addWidget(self.skip_trigger)
         opt_row.addStretch(1)
-        self.reliable_check = QCheckBox("Skip slow 20-byte fallback")
-        self.reliable_check.setToolTip(
-            "The flash streams at the full packet size first (matching the Nordic app), then\n"
-            "falls back to smaller packets if needed. Ticking this omits the slow 20-byte\n"
-            "last-resort rung — leave it UNticked unless you want the flash to fail rather\n"
-            "than crawl at 20 bytes on a difficult adapter."
-        )
-        opt_row.addWidget(self.reliable_check)
         self.verbose_check = QCheckBox("Verbose log")
         self.verbose_check.setToolTip("Log every packet-receipt and extra timing detail for debugging.")
         opt_row.addWidget(self.verbose_check)
@@ -616,7 +602,6 @@ class MainWindow(QWidget):
             self._image,
             self.skip_trigger.isChecked(),
             self.prn_spin.value(),
-            reliable=self.reliable_check.isChecked(),
             verbose=self.verbose_check.isChecked(),
         )
 

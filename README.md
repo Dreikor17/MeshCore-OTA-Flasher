@@ -66,11 +66,12 @@ device needs — the SoftDevice can pause for several seconds to erase a flash p
 normal (you'll see a brief "device busy — waiting…" note). It never streams ahead, so it won't
 overrun the bootloader. If a flash still ends short:
 
-- **Lower the PRN** (try 4, then 1). Smaller batches are safer on a weak link.
-- **Tick "Reliable (20-byte)"** — the slow-but-solid 20-byte chunk size. It's remembered per
-  machine, and bootloader flashes always use it automatically. Some BLE adapters can't sustain
-  the faster high-MTU path; a different/better adapter may unlock it.
+- **Lower the PRN** (try 6, then 4). Smaller batches are safer on a weak link.
 - **Save the verbose log** so the exact failure point can be pinpointed.
+
+The firmware streams at the full packet size (MTU-3, ~244 bytes) — exactly what the Nordic
+mobile app uses — and falls back to a smaller packet automatically if an adapter can't sustain
+it. (Feeding this bootloader 20-byte packets is what made earlier versions stall.)
 
 > Separately, the **stock** "AdaDFU" bootloader can fail to auto-reboot after an OTA done while
 > on USB — flash on battery, or install OTAFIX, to avoid that. (That's a *post*-flash reboot
@@ -112,5 +113,5 @@ First public release.
 - Fetch latest firmware (repeater / companion / room-server) and the OTAFIX bootloader from
   GitHub; cached for offline reuse.
 - Live signal meter, progress + bitrate + ETA, and a post-flash summary (adapter, time, rate).
-- "Reliable (20-byte)" mode, an automatic chunk-size fallback ladder, and stuck-state
-  (SYS_RESET) recovery for robust transfers across varied BLE adapters.
+- Full-MTU (244-byte) streaming matching the Nordic mobile app, with an automatic chunk-size
+  fallback and stuck-state (SYS_RESET) recovery for robust transfers across varied BLE adapters.
