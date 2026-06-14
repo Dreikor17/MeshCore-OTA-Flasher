@@ -55,8 +55,10 @@ RESP_NAMES = {
 # The bootloader HARD-REQUIRES the .dat device_type to equal this (else NRF_ERROR_FORBIDDEN).
 ADAFRUIT_DEVICE_TYPE = 0x0052  # 82
 
-# Packet-receipt-notification interval. MeshCore FAQ: 10 for RAK, 8 for T114.
-DEFAULT_PRN = 10
+# Packet-receipt-notification interval (packets between flow-control receipts). OTAFIX's
+# README recommends 8; with the 240 B accumulator a window then stays at/under the 8-slot
+# pstorage ring so one lazy page-erase can absorb a full window without dropping data.
+DEFAULT_PRN = 8
 
 # Firmware chunk cap for the high-MTU path. Capped conservatively at 180 (not the full
 # 247-3=244) because a high ATT MTU does NOT guarantee the link-layer Data Length was
@@ -70,18 +72,24 @@ MIN_CHUNK = 20  # one un-fragmented link-layer packet at the classic 23-byte ATT
 # effective PRN as round(TARGET_PRN_BYTES / chunk): ~3 at 180-byte, ~4 at 128-byte, 10 at
 # 20-byte. ~480 bytes in flight matches the proven MTU-23 case (~200) closely enough.
 TARGET_PRN_BYTES = 480
-# Light per-packet pacing on the high-MTU path only (the stock 20-byte path stays full-speed).
-HIGH_MTU_PACE_S = 0.002
-# Tolerate transient missed packet-receipt notifications; only fail after this many in a row.
+# Per-packet pacing applied to EVERY chunk. OTAFIX lazy-erases flash page-by-page as data
+# arrives and buffers into an 8-slot ring; a tight burst overruns it during an ~85 ms page
+# erase and the excess is silently dropped. Spreading each packet by a few ms lets the ring
+# drain. (The app raises the Windows timer resolution so this small sleep is honored.)
+STREAM_PACE_S = 0.003
+# Abort after this many consecutive missed receipts — a real sign the device is overrunning;
+# continuing past it would only lose more data (do NOT free-run).
 MAX_PRN_MISSES = 3
 # Settle time after a SYS_RESET (0x06) recovery before rescanning for the rebooted bootloader.
 SYS_RESET_SETTLE_S = 3.0
-# Timeout for the FIRST packet-receipt (the bootloader may be erasing flash before it can ack).
-# Kept modest so a lost first receipt doesn't stall the UI for minutes — VALIDATE's CRC is the
-# real completion gate, and we log how long it actually took (see verbose timing).
-FIRST_PRN_TIMEOUT_S = 40.0
+# Timeout for the FIRST packet-receipt. With paced sending the device only erases page 0 before
+# the START ack, so the first receipt should land in ~1-2 s; 10 s is generous headroom and a
+# late one now means trouble (we abort after MAX_PRN_MISSES), not "keep streaming".
+FIRST_PRN_TIMEOUT_S = 10.0
 # Timeout for subsequent receipts during steady streaming (normally arrive in well under 1 s).
-PRN_TIMEOUT_S = 15.0
+PRN_TIMEOUT_S = 8.0
+# START_DFU ack can take a moment (page-0 erase + MTU settle); give it room.
+START_DFU_TIMEOUT_S = 60.0
 
 # Advertised-name hints used to classify scan results.
 OTA_NAME_HINT  = "_OTA"          # app-mode after `start ota` (e.g. RAK4631_OTA)

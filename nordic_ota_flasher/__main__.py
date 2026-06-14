@@ -21,6 +21,17 @@ from .gui.main_window import MainWindow  # noqa: E402
 
 
 def main() -> int:
+    # Raise the Windows timer resolution to 1 ms so the small per-packet pacing sleeps used
+    # during streaming are honored (the default ~15.6 ms granularity would make them crawl).
+    _winmm = None
+    try:
+        import ctypes
+
+        _winmm = ctypes.WinDLL("winmm")
+        _winmm.timeBeginPeriod(1)
+    except Exception:
+        _winmm = None
+
     app = QApplication(sys.argv)
     app.setApplicationName("RFLab.io OTA Flasher")
     app.setStyle("Fusion")
@@ -31,8 +42,15 @@ def main() -> int:
     window = MainWindow()
     window.show()
 
-    with loop:
-        loop.run_forever()
+    try:
+        with loop:
+            loop.run_forever()
+    finally:
+        if _winmm is not None:
+            try:
+                _winmm.timeEndPeriod(1)
+            except Exception:
+                pass
     return 0
 
 

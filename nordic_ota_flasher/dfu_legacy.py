@@ -167,7 +167,7 @@ class LegacyDfu:
         )
         await self.t.write_ctrl(bytes([C.OP_START_DFU, img.mode]))
         await self.t.write_packet(img.size_block)
-        await self._await_response(C.OP_START_DFU)
+        await self._await_response(C.OP_START_DFU, timeout=C.START_DFU_TIMEOUT_S)
 
         # 2) INIT packet
         self._log(f"Sending init packet ({len(img.dat_data)} B)")
@@ -199,7 +199,9 @@ class LegacyDfu:
         # test of a complete, correct image. If the device really is short, VALIDATE fails
         # (CRC_ERROR) or rejects (INVALID_STATE) and the controller retries — still safe.
         try:
-            await self._await_response(C.OP_RECEIVE_FW, timeout=15.0)
+            await self._await_response(
+                C.OP_RECEIVE_FW, timeout=max(60.0, len(self.img.bin_data) / 50000)
+            )
             self._log("Firmware image received by device.")
         except DfuError:
             self._log(
@@ -233,9 +235,9 @@ class LegacyDfu:
         total = len(data)
         cs = self.t.chunk_size
         prn = self._eff_prn
-        pace = cs > C.MIN_CHUNK  # light throttle on the high-MTU (fragmenting) path only
         sent = 0
         pkts_since_prn = 0
+        prn_misses = 0
         first_prn = True
         last_acked = 0
         start = time.monotonic()
@@ -245,8 +247,9 @@ class LegacyDfu:
         while sent < total:
             chunk = data[sent : sent + cs]
             await self.t.write_packet(chunk)
-            if pace:
-                await asyncio.sleep(C.HIGH_MTU_PACE_S)
+            # Pace EVERY packet: OTAFIX lazy-erases as data arrives into an 8-slot ring; a
+            # tight burst overruns it during a page erase and the excess is silently dropped.
+            await asyncio.sleep(C.STREAM_PACE_S)
             sent += len(chunk)
             pkts_since_prn += 1
 
@@ -276,6 +279,7 @@ class LegacyDfu:
                 try:
                     acked = await self._await_prn(timeout=timeout)
                     last_acked = acked
+                    prn_misses = 0
                     if first_prn:
                         self._log(
                             f"  first packet-receipt after {time.monotonic() - t0:.1f}s "
@@ -284,12 +288,20 @@ class LegacyDfu:
                     elif self._verbose:
                         self._log(f"  [v] receipt: device acked {acked} B (sent {sent} B)")
                 except DfuError:
-                    # A lost/late receipt is NOT fatal — notifications can drop on a flaky link
-                    # while the data still arrives; VALIDATE's CRC is the authoritative gate.
+                    # Do NOT free-run: streaming past missing receipts is exactly what overruns
+                    # the bootloader's 8-slot ring during a lazy page-erase and drops data.
+                    prn_misses += 1
                     self._log(
                         f"  no packet-receipt within {time.monotonic() - t0:.0f}s "
-                        f"({'first window' if first_prn else 'mid-stream'}) — continuing."
+                        f"({'first window' if first_prn else 'mid-stream'}, "
+                        f"{prn_misses}/{C.MAX_PRN_MISSES})"
                     )
+                    if prn_misses >= C.MAX_PRN_MISSES:
+                        raise DfuError(
+                            f"No packet-receipt for {C.MAX_PRN_MISSES} consecutive windows — the "
+                            "device is not draining (it may be overrunning during flash erase). "
+                            "Aborting before more data is lost."
+                        )
                 first_prn = False
                 pkts_since_prn = 0
 
