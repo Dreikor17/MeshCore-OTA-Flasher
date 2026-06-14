@@ -73,11 +73,12 @@ class LegacyDfu:
         self.transfer_seconds = 0.0
 
     def _effective_prn(self, cs: int) -> int:
-        """Effective packet-receipt interval (writes per flow-control window). Legacy bootloaders
-        clamp PRN to 1..10 (>10 -> OPERATION_FAILED), so honor the user's value up to 10."""
+        """Packets per flow-control window. Hard-capped at PRN_MAX_SAFE: the bootloader's DFU
+        receive-buffer pool holds ~8 packets and the per-window receipt gate keeps that many in
+        flight, so a larger window overruns the pool and the device goes silent (PRN 10 did)."""
         if self.prn <= 0:
             return 0
-        return max(1, min(self.prn, 10))
+        return max(1, min(self.prn, C.PRN_MAX_SAFE))
 
     @property
     def avg_bps(self) -> float:

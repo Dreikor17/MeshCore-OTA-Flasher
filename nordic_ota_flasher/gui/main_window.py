@@ -204,19 +204,19 @@ class MainWindow(QWidget):
         opt_row.addWidget(self.verbose_check)
         opt_row.addWidget(QLabel("PRN:"))
         self.prn_spin = QSpinBox()
-        self.prn_spin.setRange(0, 100)
+        self.prn_spin.setRange(1, C.PRN_MAX_SAFE)
         self.prn_spin.setValue(C.DEFAULT_PRN)
         self.prn_spin.setToolTip(
             "Packet-Receipt-Notification interval — the device acks every N firmware packets "
             "(flow control).\n"
-            "Higher N = fewer round-trips = faster, but too high can overflow the device.\n"
-            "This is safe to experiment with: a corrupted transfer fails the CRC check at the "
-            "end and is NOT activated (old firmware is kept).\n"
-            "10 is MeshCore's recommended value for RAK; try 20–30 to speed up a stock "
-            "(MTU 23) bootloader flash."
+            "Higher N = fewer round-trips = faster, but the bootloader's receive-buffer pool "
+            "holds only ~8 packets, so above ~6 it overruns and goes silent (PRN 10 does).\n"
+            f"Capped at {C.PRN_MAX_SAFE}; 4 is the safe default. Lower it (e.g. 2) on a weak link.\n"
+            "Safe to experiment with: a corrupted transfer fails the CRC check and is NOT "
+            "activated (old firmware is kept)."
         )
         opt_row.addWidget(self.prn_spin)
-        prn_note = QLabel("(device acks every N packets; higher = faster, 10 = safe for RAK)")
+        prn_note = QLabel(f"(device acks every N packets; higher = faster, ≤{C.PRN_MAX_SAFE} for RAK)")
         prn_note.setStyleSheet("color: gray;")
         opt_row.addWidget(prn_note)
         gv.addLayout(opt_row)

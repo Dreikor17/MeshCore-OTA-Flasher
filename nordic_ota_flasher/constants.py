@@ -55,9 +55,13 @@ RESP_NAMES = {
 # The bootloader HARD-REQUIRES the .dat device_type to equal this (else NRF_ERROR_FORBIDDEN).
 ADAFRUIT_DEVICE_TYPE = 0x0052  # 82
 
-# Packet-receipt-notification interval (packets between flow-control receipts). 10 is the
-# Nordic/legacy standard (the bootloader clamps PRN to 1..10; >10 -> OPERATION_FAILED).
-DEFAULT_PRN = 10
+# Packet-receipt-notification interval (packets between flow-control receipts). The bootloader's
+# DFU receive-buffer pool holds only ~8 packets, and the per-window receipt gate keeps that many
+# in flight, so too high a PRN overruns the pool and the device goes SILENT (no receipt) — PRN 10
+# does exactly that on the RAK/OTAFIX bootloader (fails at both 244- and 128-byte chunks: it's
+# the packet COUNT, not size). 4 is a safe, fast-enough default; _effective_prn hard-caps at 6.
+DEFAULT_PRN = 4
+PRN_MAX_SAFE = 6  # hard cap: keep a window under the ~8-packet RX pool so it can't go silent
 
 # Firmware chunk = MTU-3 (244 at the negotiated 247). The Nordic Android DFU client streams
 # firmware at MTU-3 too (it grows its send buffer to mtu-3 once MTU is negotiated), which FILLS
