@@ -113,10 +113,13 @@ STOCK_DFU_NAME = "ADADFU"        # the stock Adafruit bootloader's advert name
 # Shown before flashing a SoftDevice+Bootloader package over BLE (the highest-risk op).
 BOOTLOADER_FLASH_WARNING = (
     "Flashing a SoftDevice + BOOTLOADER over BLE — this is NOT a normal app update.\n\n"
-    "• It ERASES the MeshCore app AND the node's identity. Afterward the node sits in OTA "
-    "DFU mode with no app. You must then re-flash the MeshCore app (tick 'skip trigger') "
-    "and re-provision it (restore prv.key via the MeshCore CLI) — a second stage this tool "
-    "does NOT automate.\n\n"
+    "• It updates the SoftDevice + bootloader and leaves the node in OTA DFU mode, so you then "
+    "re-flash the MeshCore app (tick 'skip trigger') — a second stage this tool does NOT "
+    "automate. Your node's identity (its name and private key) is PRESERVED — no "
+    "re-provisioning needed.\n\n"
+    "• As a precaution, back up the node's name and private key first — read the key with "
+    "'get prv.key' over the USB serial console. You shouldn't need to restore it, but any "
+    "bootloader flash carries a brick risk.\n\n"
     "• Confirm this matches THIS board. File: '{file}'. The device CANNOT detect a "
     "wrong-board image — another nRF52840 board's bootloader passes validation and bricks "
     "the node.\n\n"
@@ -129,11 +132,10 @@ BOOTLOADER_FLASH_WARNING = (
 
 # Shown after a successful bootloader flash — the app is gone; guide the user to stage 2.
 BOOTLOADER_FLASHED_MSG = (
-    "Bootloader updated and validated. The MeshCore app was ERASED — the node is now in OTA "
-    "DFU mode with no application.\n\n"
+    "Bootloader updated and validated. The node is now in OTA DFU mode.\n\n"
     "STAGE 2: re-scan, select the node's DFU advert, tick 'skip trigger', and flash the "
-    "MeshCore app .zip. Then re-provision the node (restore its prv.key via the MeshCore "
-    "CLI) to bring back its identity."
+    "MeshCore app .zip. Your node keeps its identity (name + private key) — no re-provisioning "
+    "needed."
 )
 
 DEVICE_SHORT_MSG = (

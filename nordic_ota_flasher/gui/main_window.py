@@ -167,8 +167,8 @@ class MainWindow(QWidget):
         otafix_row.addStretch(1)
         fv.addLayout(otafix_row)
         otafix_note = QLabel(
-            "⚠ Updating the bootloader ERASES the app — you must re-flash the firmware "
-            "(and re-provision the node) afterward."
+            "⚠ Updating the bootloader leaves the node in DFU mode — re-flash the firmware "
+            "afterward. Your node keeps its name + private key; back them up first as a precaution."
         )
         otafix_note.setWordWrap(True)
         otafix_note.setStyleSheet("color: #b8860b;")
@@ -628,14 +628,14 @@ class MainWindow(QWidget):
         self._log(("SUCCESS: " if ok else "ERROR: ") + message)
         if ok:
             self.progress.setValue(100)
-            # A bootloader flash erased the app — clear the loaded bootloader package so the
-            # user picks the MeshCore app for stage 2 (and can't re-flash the bootloader).
+            # After a bootloader flash the node sits in DFU mode (app not bootable) — clear the
+            # loaded bootloader package so the user picks the MeshCore app for stage 2.
             if self._image is not None and self._image.is_bootloader:
                 self._image = None
                 self._firmware_path = None
                 self.fw_info.setText(
                     "Bootloader updated — now select the MeshCore <b>app</b> firmware and flash "
-                    "it (tick 'skip trigger'), then re-provision the node."
+                    "it (tick 'skip trigger'). Your node keeps its name + private key."
                 )
                 # The node rebooted into the new bootloader on a fresh DFU advert (new MAC),
                 # so the old selection is stale. Clear it and auto-rescan so stage 2 lands on

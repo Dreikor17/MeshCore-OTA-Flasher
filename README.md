@@ -49,10 +49,15 @@ after an OTA performed while on USB, and OTA is slower. You can flash OTAFIX **o
 
 1. *Select firmware* → **Fetch OTA-fix bootloader** → pick your board (e.g.
    `wiscore_rak4631_board`). It downloads the combined SoftDevice+Bootloader package.
-2. **Flash.** ⚠️ This **erases the app and the node's identity** — it's a two-stage update.
-3. The node is then in DFU mode with no app. **Flash the MeshCore app** (the app auto-rescans
-   for you), then **restore the node's identity** over USB serial: run `get prv.key`
-   *before* the swap to save it, and `set prv.key <hex>` *after* to restore it.
+2. **Flash.** It's a two-stage update: the node ends up in DFU mode, so you re-flash the app
+   next. Your node's **identity (name + private key) is preserved** — no re-provisioning.
+3. The node is then in DFU mode. **Flash the MeshCore app** (the app auto-rescans for you) and
+   it boots back up with its original name and key.
+
+> **Back up first (precaution).** A bootloader flash is the riskiest operation, so save your
+> node's **name** and **private key** beforehand — read the key with `get prv.key` over the USB
+> serial console (`set prv.key <hex>` restores it if you ever need to). You shouldn't need them
+> for a normal OTA-fix update, but it's cheap insurance.
 
 **Cautions** — a bootloader flash is the one operation that can brick a node:
 - Flash only the package for **your exact board** (the device can't reject a wrong-board image).
@@ -143,7 +148,7 @@ First public release.
 - BLE OTA flashing of MeshCore firmware to nRF52840 / RAK4631 (legacy Nordic DFU).
 - Buttonless `start ota` trigger → bootloader reconnect → stream → validate → activate.
 - OTA-fix (OTAFIX) bootloader flashing over BLE (combined SoftDevice+Bootloader), with a full
-  brick-risk warning and two-stage (re-flash app + re-provision) guidance.
+  brick-risk warning and two-stage (re-flash app; identity preserved) guidance.
 - Fetch latest firmware (repeater / companion / room-server) and the OTAFIX bootloader from
   GitHub; cached for offline reuse.
 - Live signal meter, progress + bitrate + ETA, and a post-flash summary (adapter, time, rate).
