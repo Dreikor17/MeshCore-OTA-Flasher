@@ -12,7 +12,7 @@ Nordic DFU protocol used by the Adafruit nRF52 bootloader and the
 
 ## Download
 
-Grab **`MeshCore-OTA-Flasher-v0.2.2.exe`** from the
+Grab **`MeshCore-OTA-Flasher-v0.2.4.exe`** from the
 [**latest release**](https://github.com/Dreikor17/MeshCore-OTA-Flasher/releases/latest) — a
 single self-contained file, no install needed. Just run it.
 
@@ -103,6 +103,15 @@ unused Qt modules).
 - For clean, unattended OTAs, run the OTAFIX bootloader and keep a USB recovery path handy.
 
 ## Releases / Changelog
+
+### v0.2.4
+Patch — fixes flashes freezing mid-transfer on faster BLE adapters.
+- **Send-rate cap.** On a fast BLE link the tool could hand the bootloader firmware faster than
+  its flash could erase/write it; the device's flash pipeline backed up and it froze mid-flash
+  during an erase. (The bootloader acks *received* bytes, not *flushed-to-flash* bytes, so the
+  per-window flow-control gate didn't catch it.) The send rate is now throttled so a quick
+  adapter behaves like a slow one — which always worked. Reliable, at the cost of a slower
+  transfer; an already-slow adapter is unaffected.
 
 ### v0.2.2
 Patch — fixes a flash stall introduced in v0.2.0.
