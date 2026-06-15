@@ -300,25 +300,17 @@ class LegacyDfu:
         start = time.monotonic()
         last_emit = 0.0
         last_log = start
-        # Minimum spacing between packet writes to hold the send rate under MAX_STREAM_BPS, so a
-        # fast BLE link can't outrun the device's flash erase/write and wedge it (the receipt is
-        # a received-count, not a flushed-count, so it can't protect against this on its own).
-        min_interval = (cs / C.MAX_STREAM_BPS) if C.MAX_STREAM_BPS > 0 else 0.0
-        last_pkt = start
 
         while sent < total:
             chunk = data[sent : sent + cs]
+            # One write in flight at a time — and NO artificial pacing. bleak/WinRT's
+            # write_value_with_result_and_option_async awaits the controller's flow control
+            # before returning, exactly like the Nordic Android client's onCharacteristicWrite
+            # callback, so the link is already self-throttled. Adding per-packet sleeps only
+            # disrupts the device's flash-erase scheduling and stalls the transfer mid-stream.
             await self.t.write_packet(chunk)
             sent += len(chunk)
             pkts_since_prn += 1
-            # Rate-limit: keep each write at least min_interval after the previous one. A receipt
-            # wait counts toward the interval (so the first packet after a receipt isn't delayed),
-            # but within a window this throttles a fast link to the flash's sustainable rate.
-            if min_interval:
-                gap = min_interval - (time.monotonic() - last_pkt)
-                if gap > 0:
-                    await asyncio.sleep(gap)
-            last_pkt = time.monotonic()
 
             now = time.monotonic()
             if now - last_emit >= 0.1 or sent == total:

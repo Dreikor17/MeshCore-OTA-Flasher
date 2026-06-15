@@ -74,15 +74,11 @@ PRN_MAX_SAFE = 6  # hard cap: keep a window under the ~8-packet RX pool so it ca
 MAX_CHUNK = 244
 MIN_CHUNK = 20  # one un-fragmented packet at ATT MTU 23 — the slow fallback geometry
 
-# Cap the firmware SEND rate (bytes/sec). The bootloader acks RECEIVED bytes, not flushed-to-
-# flash bytes, so on a FAST BLE link we queue data faster than the flash can erase/write it: the
-# device's flash pipeline backs up and it WEDGES the moment it hits an erase (the per-window
-# receipt gate does NOT prevent this — receipts keep arriving because the data was "received").
-# A slow link / the phone app stay under the flash's effective throughput and succeed (a known-
-# good run streamed steadily at ~2.1 KiB/s with zero stalls). Cap at ~2 KiB/s so a fast adapter
-# is throttled to behave like that proven run; a slow link is already under the cap (no delay).
-# This also spaces packets enough to avoid the WinRT first-window write burst. Tunable.
-MAX_STREAM_BPS = 2048
+# NO artificial send-rate throttling: bleak/WinRT's awaited write-without-response is already
+# one-write-in-flight (the await returns only when the controller's flow control is ready), just
+# like the Nordic Android client. Earlier builds added a rate cap / per-packet pacing on a wrong
+# theory (that WinRT fire-and-forgets writes); that pacing actually disrupted the device's
+# flash-erase scheduling and STALLED transfers mid-stream. Removed — we stream like the phone app.
 # A missed receipt is FATAL on the first miss: we must never stream the next window without the
 # current window's receipt (that is what overruns the device during a deferred flash erase).
 MAX_PRN_MISSES = 1
@@ -93,14 +89,12 @@ SYS_RESET_SETTLE_S = 3.0
 #   FIRST window: a healthy bootloader acks the first window in ~0 s, so a long silence here
 #   means it is WEDGED (commonly left non-IDLE by a prior aborted transfer) — detect that fast
 #   and reset, don't wait a full minute.
-#   MID-STREAM: the device can withhold the receipt for a LONG time during a flash erase — the
-#   OLD/stock Adafruit bootloader (no lazy erase) does a big synchronous SD-region erase on an
-#   SD+BL update, and the SoftDevice also defers flash behind radio events. The Nordic Android
-#   app waits effectively forever here, so we must be very patient — a too-short timeout aborts a
-#   transfer that is still progressing (and a mid-erase abort/reset can corrupt the SoftDevice).
-# A real disconnect aborts instantly in both cases (BleDisconnected wakes next_notification).
+#   MID-STREAM: with no artificial pacing the device streams continuously and the receipt for
+#   each window lands in well under a second; a flash-page erase is brief. We keep a modest
+#   backstop only to fail rather than hang if the device truly stops responding — it should
+#   never fire in a healthy transfer (a real disconnect aborts instantly via BleDisconnected).
 FIRST_PRN_TIMEOUT_S = 15.0
-PRN_TIMEOUT_S = 300.0
+PRN_TIMEOUT_S = 30.0
 # START_DFU ack can take a while (the bootloader may erase flash before acking); give it room.
 START_DFU_TIMEOUT_S = 60.0
 
