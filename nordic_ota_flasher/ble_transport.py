@@ -5,7 +5,8 @@ Responsibilities:
   * connect (forcing fresh GATT discovery — the DFU-mode MAC/layout change can be
     hidden by Windows' stale service cache)
   * subscribe to Control Point notifications and funnel them into a queue
-  * expose write_ctrl (write-with-response) and write_packet (write-without-response)
+  * expose write_ctrl (write-with-response) and write_packet (write type per
+    C.PACKET_WRITE_WITH_RESPONSE — with-response by default for per-packet back-pressure)
   * compute a safe firmware chunk size from the negotiated ATT MTU
 """
 
@@ -166,8 +167,14 @@ class BleTransport:
         await self.client.write_gatt_char(C.DFU_CONTROL_UUID, bytes(data), response=True)
 
     async def write_packet(self, data: bytes) -> None:
+        # PACKET_WRITE_WITH_RESPONSE=True (default) writes a Write Request and awaits the device's
+        # per-packet ATT acknowledgement = genuine one-in-flight back-pressure (the WinRT substitute
+        # for Android's onCharacteristicWrite gate, which WinRT does not expose for no-response
+        # writes). Legal on the legacy DFU Packet char (0x1532 declares char_props.write=1).
         assert self.client is not None
-        await self.client.write_gatt_char(C.DFU_PACKET_UUID, bytes(data), response=False)
+        await self.client.write_gatt_char(
+            C.DFU_PACKET_UUID, bytes(data), response=C.PACKET_WRITE_WITH_RESPONSE
+        )
 
     async def disconnect(self) -> None:
         if self.client is not None:

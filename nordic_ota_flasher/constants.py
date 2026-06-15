@@ -55,54 +55,49 @@ RESP_NAMES = {
 # The bootloader HARD-REQUIRES the .dat device_type to equal this (else NRF_ERROR_FORBIDDEN).
 ADAFRUIT_DEVICE_TYPE = 0x0052  # 82
 
-# Packet-receipt-notification interval (packets between flow-control receipts). The bootloader's
-# DFU receive-buffer pool holds only ~8 packets, and the per-window receipt gate keeps that many
-# in flight, so too high a PRN overruns the pool and the device goes SILENT (no receipt) — PRN 10
-# does exactly that on the RAK/OTAFIX bootloader (fails at both 244- and 128-byte chunks: it's
-# the packet COUNT, not size). 4 is a safe, fast-enough default; _effective_prn hard-caps at 6.
-DEFAULT_PRN = 4
-PRN_MAX_SAFE = 6  # hard cap: keep a window under the ~8-packet RX pool so it can't go silent
+# Packet-Receipt-Notification interval. DEFAULT IS 0 = DISABLED — this is what the Nordic Android
+# DFU app does: on Android 6+ it flashes with PRN OFF (it never even sends Op 0x08) and streams the
+# image paced purely by the BLE stack accepting each write. Forcing PRN on (our old default 4) and
+# blocking on the bootloader's byte-count receipts is exactly what stalled the stock 'AdaDFU' SD+BL
+# flash — the bootloader stops emitting receipts during the SoftDevice self-overwrite and our gate
+# hung waiting for them. PRN > 0 remains a selectable FALLBACK (gate on the 0x11 receipts), and is
+# hard-capped at PRN_MAX_SAFE to keep a window under the bootloader's ~8-packet RX pool.
+DEFAULT_PRN = 0
+PRN_MAX_SAFE = 6  # fallback only
 
-# Firmware chunk = MTU-3 (244 at the negotiated 247). The Nordic Android DFU client streams
-# firmware at MTU-3 too (it grows its send buffer to mtu-3 once MTU is negotiated), which FILLS
-# the bootloader's MTU-sized RX buffer blocks. Feeding 20-byte writes into those ~244-byte
-# blocks wastes most of each block and exhausts the small (~8-block) pool after a few packets —
-# then the bootloader silently ignores all further Packet writes (no receipt, no error). That
-# was the real "device won't ack the first window" bug, and WinRT won't let us lower the MTU,
-# so we MATCH it instead. bleak/WinRT awaits each write-without-response (write_value_with_
-# result), so 244-byte writes are serialized one-at-a-time, not a fire-and-forget burst.
+# Firmware-packet flow control = WRITE-WITH-RESPONSE on the DFU Packet characteristic (0x1532).
+# The phone paces off Android's onCharacteristicWrite callback (exactly one no-response write in
+# flight at a time). WinRT gives NO equivalent per-write back-pressure for write-without-response —
+# the await only confirms the LOCAL Windows stack queued the PDU (confirmed by the bleak maintainer;
+# field reports show writes burst then drop the link). The legacy bootloader's Packet char DECLARES
+# char_props.write = 1 (Nordic SDK11 ble_dfu.c), so a Write Request is GATT-legal here and returns a
+# per-packet ATT acknowledgement = true one-in-flight back-pressure that cannot outrun the device —
+# the robust WinRT substitute for the phone's callback gate. NOTE: legal on LEGACY DFU only (a
+# Secure-DFU packet char is write-without-response-only and would reject this); we only target
+# legacy DFU here. Set False to stream write-without-response like the phone (needs PRN as backpressure).
+PACKET_WRITE_WITH_RESPONSE = True
+
+# Firmware chunk = MTU-3 (244 at the negotiated 247; 20 at the stock bootloader's MTU 23). The
+# Nordic Android client streams at MTU-3 too. WinRT auto-negotiates the MTU and won't let us force
+# it, but the stock 'AdaDFU' bootloader only grants MTU 23 anyway, so both ends stream 20-byte
+# packets there regardless.
 MAX_CHUNK = 244
-MIN_CHUNK = 20  # one un-fragmented packet at ATT MTU 23 — the slow fallback geometry
+MIN_CHUNK = 20  # one un-fragmented packet at ATT MTU 23 (stock bootloader geometry)
 
-# NO per-packet send pacing. An earlier build added a fixed inter-packet sleep on the theory that
-# WinRT's awaited write-without-response bursts and overruns the bootloader's ~8-slot RX pool.
-# That theory does NOT hold for this code path: the receipt-gate in _stream_firmware blocks after
-# every PRN (DEFAULT_PRN=4) packets and sends NOTHING for the next window until the receipt
-# arrives, so at most PRN packets (4, well under the 8-slot pool) are ever in flight — bursting
-# cannot overrun it. A field log confirmed it empirically (the device absorbed an effectively
-# un-paced 7200 B with zero loss, then stalled only at a flash-write boundary). So pacing fixed
-# nothing and only taxed throughput ~8x on the 20-byte path. The receipt-gate IS the flow
-# control; the device's per-window byte-count receipt is the backpressure.
-# A missed receipt is FATAL on the first miss: we must never stream the next window without the
-# current window's receipt (that is what overruns the device during a deferred flash erase).
+# Fallback-only (PRN > 0): a missed receipt is fatal on the first miss — never stream the next
+# window without the current window's receipt. Unused in the default PRN=0 (write-with-response) path.
 MAX_PRN_MISSES = 1
 # Settle time after a SYS_RESET (0x06) recovery before rescanning for the rebooted bootloader.
 SYS_RESET_SETTLE_S = 3.0
-# Receipt/ack-wait backstops — LONG, and bounded by DISCONNECT, matching the Nordic phone app
-# (its wait is effectively infinite — a bare lock.wait() bounded only by link loss). The stock
-# 'AdaDFU' bootloader can stop servicing BLE for tens of seconds during a flash write (56+ s of
-# silence observed mid-stream at a write boundary). A real disconnect still aborts instantly
-# (BleDisconnected wakes next_notification), so a long ceiling costs nothing on a dead link; it
-# only gives a genuinely-slow-but-alive bootloader the chance to finish.
-# CAVEAT (field evidence): on the BARE STOCK bootloader an SD+BL update has NOT been observed to
-# RESUME after such a stall — every stall ran to the timeout or ended in a link drop, and the
-# node often came back unreachable. So treat these as a patient backstop, NOT a proven fix for
-# stock SD+BL-over-BLE. On a modern OTAFIX 2.1+ bootloader receipts arrive in well under a second
-# and these never fire.
-FIRST_PRN_TIMEOUT_S = 180.0
-PRN_TIMEOUT_S = 180.0
-# START_DFU and the post-stream RECEIVE/VALIDATE acks can also stall on the stock bootloader.
-START_DFU_TIMEOUT_S = 180.0
+# Response/ack-wait backstop — LONG and DISCONNECT-bounded, matching the Nordic app (whose waits are
+# untimed, bounded only by link loss). A real disconnect still aborts instantly (BleDisconnected
+# wakes next_notification), so a long ceiling costs nothing on a dead link; it only lets a
+# genuinely-slow-but-alive bootloader finish. Used for the START_DFU / INIT / RECEIVE / VALIDATE acks.
+ACK_BACKSTOP_S = 600.0
+START_DFU_TIMEOUT_S = ACK_BACKSTOP_S
+# Fallback-only PRN receipt-wait backstops (same long, disconnect-bounded value).
+FIRST_PRN_TIMEOUT_S = ACK_BACKSTOP_S
+PRN_TIMEOUT_S = ACK_BACKSTOP_S
 
 # Advertised-name hints used to classify scan results.
 OTA_NAME_HINT  = "_OTA"          # app-mode after `start ota` (e.g. RAK4631_OTA)

@@ -204,19 +204,21 @@ class MainWindow(QWidget):
         opt_row.addWidget(self.verbose_check)
         opt_row.addWidget(QLabel("PRN:"))
         self.prn_spin = QSpinBox()
-        self.prn_spin.setRange(1, C.PRN_MAX_SAFE)
+        self.prn_spin.setRange(0, C.PRN_MAX_SAFE)
         self.prn_spin.setValue(C.DEFAULT_PRN)
         self.prn_spin.setToolTip(
-            "Packet-Receipt-Notification interval — the device acks every N firmware packets "
-            "(flow control).\n"
-            "Higher N = fewer round-trips = faster, but the bootloader's receive-buffer pool "
-            "holds only ~8 packets, so above ~6 it overruns and goes silent (PRN 10 does).\n"
-            f"Capped at {C.PRN_MAX_SAFE}; 4 is the safe default. Lower it (e.g. 2) on a weak link.\n"
-            "Safe to experiment with: a corrupted transfer fails the CRC check and is NOT "
-            "activated (old firmware is kept)."
+            "Packet-Receipt-Notification interval.\n"
+            "0 = OFF (recommended) — matches the Nordic phone app: the firmware streams paced by "
+            "per-packet write-with-response back-pressure, with NO byte-count receipts. This is the "
+            "reliable path, especially for the stock 'AdaDFU' bootloader.\n"
+            f"1–{C.PRN_MAX_SAFE} = fallback — re-enable PRN and gate on the device's receipts every "
+            "N packets (the bootloader's RX pool holds only ~8). Use only if the PRN-off path "
+            "misbehaves on your adapter.\n"
+            "Safe to experiment: a corrupted transfer fails the CRC check and is NOT activated "
+            "(old firmware is kept)."
         )
         opt_row.addWidget(self.prn_spin)
-        prn_note = QLabel(f"(device acks every N packets; higher = faster, ≤{C.PRN_MAX_SAFE} for RAK)")
+        prn_note = QLabel("(0 = off, like the phone app — recommended)")
         prn_note.setStyleSheet("color: gray;")
         opt_row.addWidget(prn_note)
         gv.addLayout(opt_row)

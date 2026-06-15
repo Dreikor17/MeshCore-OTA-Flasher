@@ -209,9 +209,10 @@ class LegacyDfu:
         # the "wait as long as the phone" strategy used for START/PRN waits).
         await self._await_response(C.OP_RECEIVE_INIT, timeout=C.START_DFU_TIMEOUT_S)
 
-        # 3) Packet-receipt-notification interval (flow control). A small fixed packet COUNT
-        # (DEFAULT_PRN, hard-capped at PRN_MAX_SAFE) keeps the window under the bootloader's
-        # ~8-packet RX pool so it can't go silent; size doesn't matter, the count does.
+        # 3) Packet-Receipt-Notification interval. DEFAULT (DEFAULT_PRN=0) → _effective_prn==0 →
+        # we SKIP Op 0x08 entirely, exactly like the Nordic phone app on Android 6+: no receipts,
+        # flow control comes from per-packet write-with-response back-pressure instead. Only the
+        # PRN-fallback (a non-zero PRN, hard-capped at PRN_MAX_SAFE) sends 0x08 and gates on receipts.
         cs = self.t.chunk_size
         self._eff_prn = self._effective_prn(cs)
         if self._eff_prn > 0:
@@ -232,7 +233,7 @@ class LegacyDfu:
         # (CRC_ERROR) or rejects (INVALID_STATE) and the controller retries — still safe.
         try:
             await self._await_response(
-                C.OP_RECEIVE_FW, timeout=max(180.0, len(self.img.bin_data) / 50000)
+                C.OP_RECEIVE_FW, timeout=C.ACK_BACKSTOP_S
             )
             self._log("Firmware image received by device.")
         except DfuError:
@@ -311,11 +312,11 @@ class LegacyDfu:
         while sent < total:
             chunk = data[sent : sent + cs]
             await self.t.write_packet(chunk)
-            # NO per-packet pacing: the receipt-gate below blocks after every PRN packets and
-            # sends nothing for the next window until the receipt arrives, so at most PRN (4)
-            # packets are ever in flight — well under the bootloader's ~8-slot RX pool. The gate
-            # IS the flow control; a fixed inter-packet sleep adds no safety (a field log absorbed
-            # an un-paced 7200 B with zero loss) and only taxes throughput on the 20-byte path.
+            # Flow control = the write itself (default, PRN off). With PACKET_WRITE_WITH_RESPONSE
+            # the await above returns only after the device ATT-acknowledges this packet, so exactly
+            # one packet is ever in flight and the device can never be outrun — the WinRT stand-in
+            # for the phone's per-write onCharacteristicWrite gate. When PRN > 0 (fallback) the
+            # receipt-gate below adds the legacy byte-count windowing on top.
             sent += len(chunk)
             pkts_since_prn += 1
 
@@ -331,16 +332,17 @@ class LegacyDfu:
             if now - last_log >= 5.0:
                 el = now - start
                 kib = (sent / 1024 / el) if el > 0 else 0.0
+                acked_note = f", device acked {last_acked} B" if prn > 0 else ""
                 self._log(
                     f"  …streaming {sent * 100 // total}% — {sent}/{total} B, "
-                    f"{kib:.1f} KiB/s, device acked {last_acked} B"
+                    f"{kib:.1f} KiB/s{acked_note}"
                 )
                 last_log = now
 
-            # Flow control (the load-bearing fix): after N packets BLOCK on the device's
-            # byte-count receipt before sending one more byte — exactly like the Nordic
-            # reference. We never speculate ahead. (No wait after the final packet — the device
-            # sends the RECEIVE ack instead.)
+            # FALLBACK flow control (only when PRN > 0): after N packets BLOCK on the device's
+            # byte-count receipt before sending one more byte. The default path (PRN = 0) skips
+            # this entirely and relies on per-packet write-with-response back-pressure, like the
+            # phone. (No wait after the final packet — the device sends the RECEIVE ack instead.)
             if prn > 0 and pkts_since_prn >= prn and sent < total:
                 timeout = C.FIRST_PRN_TIMEOUT_S if first_prn else C.PRN_TIMEOUT_S
                 t0 = time.monotonic()
@@ -378,9 +380,10 @@ class LegacyDfu:
 
         self.transfer_bytes = sent
         self.transfer_seconds = max(time.monotonic() - start, 1e-6)
+        acked_note = f"; device last acked {last_acked} B" if prn > 0 else ""
         self._log(
             f"Stream finished: {sent} B in {self.transfer_seconds:.1f}s "
-            f"({self.avg_bps / 8 / 1024:.1f} KiB/s); device last acked {last_acked} B"
+            f"({self.avg_bps / 8 / 1024:.1f} KiB/s){acked_note}"
         )
 
     async def _wait_for_disconnect(self, timeout: float) -> bool:
