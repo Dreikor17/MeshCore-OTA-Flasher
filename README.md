@@ -8,6 +8,8 @@ Nordic DFU protocol used by the Adafruit nRF52 bootloader and the
 > An **RFLab.io** tool. Windows 11 · Python + PySide6 + bleak.
 > Meshtastic support is planned; this release targets MeshCore.
 
+![RFLab.io OTA Flasher — a completed RAK4631 flash over BLE](OTA%20Flasher.png)
+
 ---
 
 ## Download
