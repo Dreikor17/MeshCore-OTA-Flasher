@@ -74,29 +74,33 @@ PRN_MAX_SAFE = 6  # hard cap: keep a window under the ~8-packet RX pool so it ca
 MAX_CHUNK = 244
 MIN_CHUNK = 20  # one un-fragmented packet at ATT MTU 23 — the slow fallback geometry
 
-# NO artificial send-rate throttling: bleak/WinRT's awaited write-without-response is already
-# one-write-in-flight (the await returns only when the controller's flow control is ready), just
-# like the Nordic Android client. Earlier builds added a rate cap / per-packet pacing on a wrong
-# theory (that WinRT fire-and-forgets writes); that pacing actually disrupted the device's
-# flash-erase scheduling and STALLED transfers mid-stream. Removed — we stream like the phone app.
+# Per-packet send pacing (seconds). REQUIRED on Windows/WinRT. bleak's awaited write-without-
+# response (write_value_with_result_and_option_async) returns when the Windows GATT stack QUEUES
+# the PDU, NOT after over-the-air TX — a Write-Without-Response has no ATT ack to block on
+# (Microsoft's docs + bleak maintainer dlech both confirm there is no backpressure). So awaited
+# writes BURST several packets across one connection event and overrun the stock bootloader's
+# tiny 8-slot HCI RX pool — it then never reaches the receipt threshold and goes silent on the
+# very first window. Pace ~1 packet per connection event to emulate the one-in-flight rate the
+# Nordic phone app gets for free. (Confirmed both ways: removing this reproduced the first-window
+# silence; ~10 ms restores reliable streaming.)
+PACKET_DELAY_S = 0.010
 # A missed receipt is FATAL on the first miss: we must never stream the next window without the
 # current window's receipt (that is what overruns the device during a deferred flash erase).
 MAX_PRN_MISSES = 1
 # Settle time after a SYS_RESET (0x06) recovery before rescanning for the rebooted bootloader.
 SYS_RESET_SETTLE_S = 3.0
-# Receipt-wait backstops. We must NEVER send the next window before its receipt arrives (that
-# overruns the device), so on a timeout we abort + reset rather than stream on.
-#   FIRST window: a healthy bootloader acks the first window in ~0 s, so a long silence here
-#   means it is WEDGED (commonly left non-IDLE by a prior aborted transfer) — detect that fast
-#   and reset, don't wait a full minute.
-#   MID-STREAM: with no artificial pacing the device streams continuously and the receipt for
-#   each window lands in well under a second; a flash-page erase is brief. We keep a modest
-#   backstop only to fail rather than hang if the device truly stops responding — it should
-#   never fire in a healthy transfer (a real disconnect aborts instantly via BleDisconnected).
-FIRST_PRN_TIMEOUT_S = 15.0
-PRN_TIMEOUT_S = 30.0
-# START_DFU ack can take a while (the bootloader may erase flash before acking); give it room.
-START_DFU_TIMEOUT_S = 60.0
+# Receipt-wait backstops — long, and bounded by DISCONNECT, not a short clock. The STOCK Adafruit
+# bootloader has NO lazy erase: an SD+BL update erases the whole ~190 KB region in blocking page
+# erases (and prioritizes flash over BLE), so it legitimately withholds the packet-receipt for
+# tens of seconds (56+ s observed). The Nordic phone app survives the SAME update only because its
+# receipt wait is effectively INFINITE (bare lock.wait()). So we wait it out: a real disconnect
+# still aborts instantly (BleDisconnected wakes next_notification), so a long timeout costs
+# nothing on a dead link but saves the transfer during a healthy erase. On a modern OTAFIX 2.1+
+# bootloader (lazy erase) receipts arrive in well under a second and these never fire.
+FIRST_PRN_TIMEOUT_S = 180.0
+PRN_TIMEOUT_S = 180.0
+# START_DFU ack: on the no-lazy-erase stock target the big upfront erase often runs here.
+START_DFU_TIMEOUT_S = 180.0
 
 # Advertised-name hints used to classify scan results.
 OTA_NAME_HINT  = "_OTA"          # app-mode after `start ota` (e.g. RAK4631_OTA)

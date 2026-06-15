@@ -207,8 +207,9 @@ class LegacyDfu:
         await self.t.write_ctrl(bytes([C.OP_RECEIVE_INIT, C.INIT_COMPLETE]))
         await self._await_response(C.OP_RECEIVE_INIT)
 
-        # 3) Packet-receipt-notification interval (flow control). Scaled to the chunk size
-        # so the bytes-in-flight stay near TARGET_PRN_BYTES regardless of negotiated MTU.
+        # 3) Packet-receipt-notification interval (flow control). A small fixed packet COUNT
+        # (DEFAULT_PRN, hard-capped at PRN_MAX_SAFE) keeps the window under the bootloader's
+        # ~8-packet RX pool so it can't go silent; size doesn't matter, the count does.
         cs = self.t.chunk_size
         self._eff_prn = self._effective_prn(cs)
         if self._eff_prn > 0:
@@ -229,7 +230,7 @@ class LegacyDfu:
         # (CRC_ERROR) or rejects (INVALID_STATE) and the controller retries — still safe.
         try:
             await self._await_response(
-                C.OP_RECEIVE_FW, timeout=max(60.0, len(self.img.bin_data) / 50000)
+                C.OP_RECEIVE_FW, timeout=max(180.0, len(self.img.bin_data) / 50000)
             )
             self._log("Firmware image received by device.")
         except DfuError:
@@ -303,12 +304,14 @@ class LegacyDfu:
 
         while sent < total:
             chunk = data[sent : sent + cs]
-            # One write in flight at a time — and NO artificial pacing. bleak/WinRT's
-            # write_value_with_result_and_option_async awaits the controller's flow control
-            # before returning, exactly like the Nordic Android client's onCharacteristicWrite
-            # callback, so the link is already self-throttled. Adding per-packet sleeps only
-            # disrupts the device's flash-erase scheduling and stalls the transfer mid-stream.
             await self.t.write_packet(chunk)
+            # Pace each packet. bleak/WinRT's awaited write-without-response only QUEUES the PDU
+            # (a WoR has no ATT ack, so there is no over-the-air backpressure — confirmed by the
+            # bleak maintainer). Un-paced writes therefore burst across a connection event and
+            # overrun the stock bootloader's 8-slot RX pool, and it goes silent on the first
+            # window. A small fixed delay emulates the ~one-packet-per-connection-event rate the
+            # Nordic phone app gets for free, which WinRT will not give us.
+            await asyncio.sleep(C.PACKET_DELAY_S)
             sent += len(chunk)
             pkts_since_prn += 1
 
