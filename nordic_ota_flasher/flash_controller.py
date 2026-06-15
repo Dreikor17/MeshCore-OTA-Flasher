@@ -150,6 +150,17 @@ class FlashController(QObject):
                 except DfuInvalidState:
                     # Bootloader wedged in a non-IDLE state (a prior transfer aborted
                     # mid-stream). Only a reset clears it — not a smaller chunk.
+                    if image.is_bootloader:
+                        # NEVER auto-SYS_RESET during a SoftDevice+Bootloader update: a reset
+                        # while the SD region is mid-erase can corrupt the SoftDevice and kill
+                        # BLE. Fail cleanly and let the user power-cycle / recover over USB.
+                        raise DfuError(
+                            "The bootloader update stalled mid-transfer. NOT auto-resetting — a "
+                            "reset during a SoftDevice erase can corrupt it. Power-cycle the node. "
+                            "Installing a bootloader over BLE through the stock 'AdaDFU' bootloader "
+                            "is unreliable; the robust path is USB (double-tap reset -> drag the "
+                            ".uf2). Once OTAFIX 2.1+ is on it, bootloader OTA-over-BLE is reliable."
+                        )
                     if resets_used >= max_resets:
                         raise DfuError(
                             "The bootloader is stuck in a non-IDLE DFU state and did not "

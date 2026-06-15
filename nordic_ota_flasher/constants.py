@@ -93,11 +93,14 @@ SYS_RESET_SETTLE_S = 3.0
 #   FIRST window: a healthy bootloader acks the first window in ~0 s, so a long silence here
 #   means it is WEDGED (commonly left non-IDLE by a prior aborted transfer) — detect that fast
 #   and reset, don't wait a full minute.
-#   MID-STREAM: the SoftDevice can defer a flash erase several seconds behind radio events and
-#   legitimately withhold the receipt, so be patient (mirror the Nordic reference's long wait).
+#   MID-STREAM: the device can withhold the receipt for a LONG time during a flash erase — the
+#   OLD/stock Adafruit bootloader (no lazy erase) does a big synchronous SD-region erase on an
+#   SD+BL update, and the SoftDevice also defers flash behind radio events. The Nordic Android
+#   app waits effectively forever here, so we must be very patient — a too-short timeout aborts a
+#   transfer that is still progressing (and a mid-erase abort/reset can corrupt the SoftDevice).
 # A real disconnect aborts instantly in both cases (BleDisconnected wakes next_notification).
 FIRST_PRN_TIMEOUT_S = 15.0
-PRN_TIMEOUT_S = 60.0
+PRN_TIMEOUT_S = 300.0
 # START_DFU ack can take a while (the bootloader may erase flash before acking); give it room.
 START_DFU_TIMEOUT_S = 60.0
 
