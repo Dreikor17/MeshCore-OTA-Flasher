@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -53,7 +54,12 @@ class Asset:
     published_at: str = ""
 
 
-def _get(url: str) -> object:
+# GitHub API errors that are transient (its gateway/server hiccupped or throttled) and worth
+# retrying — a 504 Gateway Time-out is the common one.
+_RETRYABLE_HTTP = frozenset({429, 500, 502, 503, 504})
+
+
+def _get(url: str, retries: int = 3) -> object:
     headers = {
         "User-Agent": "nordic-ota-flasher",
         "Accept": "application/vnd.github+json",
@@ -63,18 +69,32 @@ def _get(url: str) -> object:
     if token:
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        if e.code == 403:
-            raise GitHubError(
-                "GitHub API rate limit hit (60/hr unauthenticated). "
-                "Set a GITHUB_TOKEN environment variable to raise it."
-            )
-        raise GitHubError(f"GitHub API error {e.code}: {e.reason}")
-    except urllib.error.URLError as e:
-        raise GitHubError(f"Network error contacting GitHub: {e.reason}")
+    for attempt in range(retries):
+        last = attempt == retries - 1
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            if e.code == 403:
+                raise GitHubError(
+                    "GitHub API rate limit hit (60/hr unauthenticated). "
+                    "Set a GITHUB_TOKEN environment variable to raise it."
+                )
+            if e.code in _RETRYABLE_HTTP and not last:
+                time.sleep(2 ** attempt)  # 1 s, 2 s backoff
+                continue
+            if e.code in _RETRYABLE_HTTP:
+                raise GitHubError(
+                    f"GitHub API temporarily unavailable ({e.code} {e.reason}) after "
+                    f"{retries} tries — try again in a moment."
+                )
+            raise GitHubError(f"GitHub API error {e.code}: {e.reason}")
+        except urllib.error.URLError as e:
+            if not last:
+                time.sleep(2 ** attempt)
+                continue
+            raise GitHubError(f"Network error contacting GitHub: {e.reason}")
+    raise GitHubError("GitHub API unreachable after retries.")  # unreachable in practice
 
 
 def latest_meshcore_firmware(role: str = "repeater") -> Asset:

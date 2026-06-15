@@ -516,6 +516,8 @@ class MainWindow(QWidget):
             boards = await asyncio.to_thread(gh.list_otafix_bootloader_zips)
         except Exception as e:  # noqa: BLE001
             self._log(f"(OTA-fix board list unavailable: {type(e).__name__}: {e})")
+            self.otafix_combo.clear()
+            self.otafix_combo.addItem("(unavailable — click Fetch to retry)")
             return
         self._otafix_assets = boards
         self.otafix_combo.clear()
