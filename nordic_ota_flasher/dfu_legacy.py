@@ -67,6 +67,7 @@ class LegacyDfu:
         self._verbose = verbose
         self._unknown_logged = 0
         self._eff_prn = 0
+        self._packet_response = True  # write-with-response packets (set per-run in run())
         self._prn_misses_total = 0  # cumulative multi-second receipt stalls (USB-reset tell)
         # populated by _stream_firmware for the post-flash summary
         self.transfer_bytes = 0
@@ -189,13 +190,24 @@ class LegacyDfu:
 
         self.t.drain()
 
+        # Decide the firmware flow-control model up front (applies to the size block, init data,
+        # and every firmware packet). _effective_prn is independent of the chunk size.
+        self._eff_prn = self._effective_prn(self.t.chunk_size)
+        # PRN == 0 (default) → write-WITH-response on every packet: each await returns only after
+        # the device ATT-acks the packet, so exactly one packet is in flight and it can't be
+        # outrun — the WinRT stand-in for the phone's onCharacteristicWrite gate. PRN > 0 → the
+        # phone's pvmesh config: write-WITHOUT-response + receipt gating every N packets (faster on
+        # an adapter that pipelines, but WinRT gives no per-packet back-pressure for no-response
+        # writes, so it may stall like older builds — we can't request the phone's HIGH conn priority).
+        self._packet_response = (self._eff_prn == 0) and C.PACKET_WRITE_WITH_RESPONSE
+
         # 1) START
         self._log(
             f"START_DFU mode={img.mode_label} "
             f"(sd={img.sd_size}, bl={img.bl_size}, app={img.app_size}, total={img.total_size} B)"
         )
         await self.t.write_ctrl(bytes([C.OP_START_DFU, img.mode]))
-        await self.t.write_packet(img.size_block)
+        await self.t.write_packet(img.size_block, response=self._packet_response)
         await self._await_response(C.OP_START_DFU, timeout=C.START_DFU_TIMEOUT_S)
 
         # 2) INIT packet
@@ -203,7 +215,7 @@ class LegacyDfu:
         await self.t.write_ctrl(bytes([C.OP_RECEIVE_INIT, C.INIT_RX]))
         cs = self.t.chunk_size
         for i in range(0, len(img.dat_data), cs):
-            await self.t.write_packet(img.dat_data[i : i + cs])
+            await self.t.write_packet(img.dat_data[i : i + cs], response=self._packet_response)
         await self.t.write_ctrl(bytes([C.OP_RECEIVE_INIT, C.INIT_COMPLETE]))
         # Long timeout: a no-lazy-erase bootloader may begin region prep here (consistent with
         # the "wait as long as the phone" strategy used for START/PRN waits).
@@ -214,7 +226,6 @@ class LegacyDfu:
         # flow control comes from per-packet write-with-response back-pressure instead. Only the
         # PRN-fallback (a non-zero PRN, hard-capped at PRN_MAX_SAFE) sends 0x08 and gates on receipts.
         cs = self.t.chunk_size
-        self._eff_prn = self._effective_prn(cs)
         if self._eff_prn > 0:
             self._log(
                 f"Setting packet-receipt interval = {self._eff_prn} "
@@ -223,7 +234,16 @@ class LegacyDfu:
             await self.t.write_ctrl(bytes([C.OP_PKT_RCPT_REQ]) + struct.pack("<H", self._eff_prn))
 
         # 4) RECEIVE firmware
-        self._log("Streaming firmware image...")
+        if self._eff_prn > 0:
+            self._log(
+                f"Streaming firmware image (write-without-response, PRN {self._eff_prn} — gating "
+                "on device receipts; the phone's pvmesh config)..."
+            )
+        else:
+            self._log(
+                "Streaming firmware image (write-with-response per-packet back-pressure, PRN off "
+                "— the reliable WinRT flow control)..."
+            )
         await self.t.write_ctrl(bytes([C.OP_RECEIVE_FW]))
         await self._stream_firmware()
         # The "image received" handshake can be missed even when the device actually got the
@@ -308,10 +328,11 @@ class LegacyDfu:
         start = time.monotonic()
         last_emit = 0.0
         last_log = start
+        log_interval = 1.0 if self._verbose else 5.0
 
         while sent < total:
             chunk = data[sent : sent + cs]
-            await self.t.write_packet(chunk)
+            await self.t.write_packet(chunk, response=self._packet_response)
             # Flow control = the write itself (default, PRN off). With PACKET_WRITE_WITH_RESPONSE
             # the await above returns only after the device ATT-acknowledges this packet, so exactly
             # one packet is ever in flight and the device can never be outrun — the WinRT stand-in
@@ -329,13 +350,19 @@ class LegacyDfu:
 
             # Periodic timestamped progress to the log so a stall is visible, and so we can see
             # whether the device's acked count keeps pace with what we've sent (loss diagnosis).
-            if now - last_log >= 5.0:
+            if now - last_log >= log_interval:
                 el = now - start
                 kib = (sent / 1024 / el) if el > 0 else 0.0
                 acked_note = f", device acked {last_acked} B" if prn > 0 else ""
+                if self._verbose:
+                    pkts = (sent + cs - 1) // cs
+                    mspp = (el * 1000 / pkts) if pkts else 0.0
+                    detail = f", {pkts} pkts, {mspp:.0f} ms/pkt"
+                else:
+                    detail = ""
                 self._log(
                     f"  …streaming {sent * 100 // total}% — {sent}/{total} B, "
-                    f"{kib:.1f} KiB/s{acked_note}"
+                    f"{kib:.1f} KiB/s{detail}{acked_note}"
                 )
                 last_log = now
 

@@ -166,15 +166,16 @@ class BleTransport:
         assert self.client is not None
         await self.client.write_gatt_char(C.DFU_CONTROL_UUID, bytes(data), response=True)
 
-    async def write_packet(self, data: bytes) -> None:
-        # PACKET_WRITE_WITH_RESPONSE=True (default) writes a Write Request and awaits the device's
-        # per-packet ATT acknowledgement = genuine one-in-flight back-pressure (the WinRT substitute
-        # for Android's onCharacteristicWrite gate, which WinRT does not expose for no-response
-        # writes). Legal on the legacy DFU Packet char (0x1532 declares char_props.write=1).
+    async def write_packet(self, data: bytes, response: bool | None = None) -> None:
+        # response=True (Write Request) awaits the device's per-packet ATT acknowledgement = genuine
+        # one-in-flight back-pressure — the WinRT substitute for Android's onCharacteristicWrite
+        # gate, which WinRT does not expose for no-response writes. Legal on the legacy DFU Packet
+        # char (0x1532 declares char_props.write=1). response=False is the phone's write type (paced
+        # by the receipt-gate instead). None → the configured default (C.PACKET_WRITE_WITH_RESPONSE).
         assert self.client is not None
-        await self.client.write_gatt_char(
-            C.DFU_PACKET_UUID, bytes(data), response=C.PACKET_WRITE_WITH_RESPONSE
-        )
+        if response is None:
+            response = C.PACKET_WRITE_WITH_RESPONSE
+        await self.client.write_gatt_char(C.DFU_PACKET_UUID, bytes(data), response=response)
 
     async def disconnect(self) -> None:
         if self.client is not None:

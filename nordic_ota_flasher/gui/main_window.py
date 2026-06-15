@@ -207,13 +207,15 @@ class MainWindow(QWidget):
         self.prn_spin.setRange(0, C.PRN_MAX_SAFE)
         self.prn_spin.setValue(C.DEFAULT_PRN)
         self.prn_spin.setToolTip(
-            "Packet-Receipt-Notification interval.\n"
-            "0 = OFF (recommended) — matches the Nordic phone app: the firmware streams paced by "
-            "per-packet write-with-response back-pressure, with NO byte-count receipts. This is the "
-            "reliable path, especially for the stock 'AdaDFU' bootloader.\n"
-            f"1–{C.PRN_MAX_SAFE} = fallback — re-enable PRN and gate on the device's receipts every "
-            "N packets (the bootloader's RX pool holds only ~8). Use only if the PRN-off path "
-            "misbehaves on your adapter.\n"
+            "Firmware flow-control mode.\n"
+            "0 = RECOMMENDED — stream with write-WITH-response: each packet is acknowledged by the "
+            "device before the next is sent (true per-packet back-pressure). Reliable on Windows, "
+            "including the stock 'AdaDFU' bootloader. Slower at MTU 23 (one packet per round-trip).\n"
+            f"1–{C.PRN_MAX_SAFE} = the phone's nRF-app config (Packet-Receipt-Notifications): stream "
+            "write-WITHOUT-response and gate on the device's receipt every N packets. Can be faster "
+            "if your adapter pipelines no-response writes, but Windows gives no per-packet back-"
+            "pressure, so it may stall like older builds (the phone avoids that with a fast "
+            "connection interval Windows can't request). Try 5 to mirror the nRF app.\n"
             "Safe to experiment: a corrupted transfer fails the CRC check and is NOT activated "
             "(old firmware is kept)."
         )
