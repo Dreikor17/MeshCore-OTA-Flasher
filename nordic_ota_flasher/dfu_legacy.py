@@ -205,7 +205,9 @@ class LegacyDfu:
         for i in range(0, len(img.dat_data), cs):
             await self.t.write_packet(img.dat_data[i : i + cs])
         await self.t.write_ctrl(bytes([C.OP_RECEIVE_INIT, C.INIT_COMPLETE]))
-        await self._await_response(C.OP_RECEIVE_INIT)
+        # Long timeout: a no-lazy-erase bootloader may begin region prep here (consistent with
+        # the "wait as long as the phone" strategy used for START/PRN waits).
+        await self._await_response(C.OP_RECEIVE_INIT, timeout=C.START_DFU_TIMEOUT_S)
 
         # 3) Packet-receipt-notification interval (flow control). A small fixed packet COUNT
         # (DEFAULT_PRN, hard-capped at PRN_MAX_SAFE) keeps the window under the bootloader's
@@ -244,17 +246,21 @@ class LegacyDfu:
         self.t.drain()  # clear any backlogged/late notifications so the ack reads clean
         await self.t.write_ctrl(bytes([C.OP_VALIDATE]))
         try:
-            await self._await_response(C.OP_VALIDATE)
+            # Long timeout: VALIDATE runs a CRC pass over the whole image (~190 KB for SD+BL)
+            # and the stock bootloader can withhold this ack for tens of seconds.
+            await self._await_response(C.OP_VALIDATE, timeout=C.START_DFU_TIMEOUT_S)
         except DfuInvalidState:
             # VALIDATE is "invalid" only because the device never reached "received-all" — it is
-            # SHORT. We streamed the whole image, so a window was lost in transit. With the
-            # receipt-gate fix this should be rare; surface it clearly and clear the wedged state
-            # so the next attempt (or a smaller chunk) starts clean.
+            # SHORT. We streamed the whole image, so a window was lost in transit.
             self._log("Device reports the image is SHORT — a window was lost in transit.")
-            try:
-                await self.send_sys_reset()  # reboot to a clean OTA-DFU state for the next attempt
-            except Exception:  # noqa: BLE001
-                pass
+            if not self.img.is_bootloader:
+                # App image: reboot to a clean OTA-DFU state so the next attempt starts clean.
+                # NEVER do this for a SoftDevice+Bootloader image — a SYS_RESET while the SD
+                # region is mid-write/erase can corrupt the SoftDevice and brick the node.
+                try:
+                    await self.send_sys_reset()
+                except Exception:  # noqa: BLE001
+                    pass
             raise DfuDeviceShort(C.DEVICE_SHORT_MSG)
         self._log("Validation OK.")
 
@@ -305,13 +311,11 @@ class LegacyDfu:
         while sent < total:
             chunk = data[sent : sent + cs]
             await self.t.write_packet(chunk)
-            # Pace each packet. bleak/WinRT's awaited write-without-response only QUEUES the PDU
-            # (a WoR has no ATT ack, so there is no over-the-air backpressure — confirmed by the
-            # bleak maintainer). Un-paced writes therefore burst across a connection event and
-            # overrun the stock bootloader's 8-slot RX pool, and it goes silent on the first
-            # window. A small fixed delay emulates the ~one-packet-per-connection-event rate the
-            # Nordic phone app gets for free, which WinRT will not give us.
-            await asyncio.sleep(C.PACKET_DELAY_S)
+            # NO per-packet pacing: the receipt-gate below blocks after every PRN packets and
+            # sends nothing for the next window until the receipt arrives, so at most PRN (4)
+            # packets are ever in flight — well under the bootloader's ~8-slot RX pool. The gate
+            # IS the flow control; a fixed inter-packet sleep adds no safety (a field log absorbed
+            # an un-paced 7200 B with zero loss) and only taxes throughput on the 20-byte path.
             sent += len(chunk)
             pkts_since_prn += 1
 
@@ -346,13 +350,15 @@ class LegacyDfu:
                     self._prn_misses_total += 1
                     secs = time.monotonic() - t0
                     if first_prn:
-                        # The device received START + init but never acked the first firmware
-                        # window — a packet-size/PRN geometry mismatch with its RX buffer pool.
-                        # Distinct signal so the controller tries the next (smaller) chunk size.
+                        # The device received START + init but went silent on the first firmware
+                        # window for the full timeout. On the stock bootloader this is the
+                        # SoftDevice write/erase hanging the radio, not a packet-size issue (the
+                        # window WAS received). Distinct signal; the controller refuses to reset a
+                        # bootloader image here and fails cleanly.
                         raise DfuNoFirstReceipt(
                             f"No packet-receipt for the first {sent}-byte window in {secs:.0f}s "
                             f"(chunk {cs} B, PRN {prn}) — the device took START and the init "
-                            "packet but is silent on firmware (buffer/PRN geometry mismatch)."
+                            "packet but went silent on the first firmware window."
                         )
                     # Mid-stream silence after earlier receipts → likely wedged; reset + retry.
                     raise DfuInvalidState(
