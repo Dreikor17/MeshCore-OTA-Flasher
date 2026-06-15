@@ -74,15 +74,15 @@ PRN_MAX_SAFE = 6  # hard cap: keep a window under the ~8-packet RX pool so it ca
 MAX_CHUNK = 244
 MIN_CHUNK = 20  # one un-fragmented packet at ATT MTU 23 — the slow fallback geometry
 
-# Per-packet pacing (seconds). REQUIRED on Windows/WinRT. The Nordic Android reference uses no
-# delay because its onCharacteristicWrite callback waits for each write-without-response to be
-# CONFIRMED (one in flight). bleak/WinRT's awaited write-without-response only QUEUES the packet
-# — it does not wait for delivery — so an un-paced window goes out as one un-flow-controlled
-# link-layer burst that overruns the device's RX (worst at connect time): packets are dropped,
-# the PRN count never reaches the window size, and the device never sends the receipt — the
-# transfer stalls with no first receipt. A few ms per packet spreads the burst so all of a
-# window arrives. (__main__ raises the Windows timer resolution so this small sleep is honored.)
-STREAM_PACE_S = 0.003
+# Cap the firmware SEND rate (bytes/sec). The bootloader acks RECEIVED bytes, not flushed-to-
+# flash bytes, so on a FAST BLE link we queue data faster than the flash can erase/write it: the
+# device's flash pipeline backs up and it WEDGES the moment it hits an erase (the per-window
+# receipt gate does NOT prevent this — receipts keep arriving because the data was "received").
+# A slow link / the phone app stay under the flash's effective throughput and succeed (a known-
+# good run streamed steadily at ~2.1 KiB/s with zero stalls). Cap at ~2 KiB/s so a fast adapter
+# is throttled to behave like that proven run; a slow link is already under the cap (no delay).
+# This also spaces packets enough to avoid the WinRT first-window write burst. Tunable.
+MAX_STREAM_BPS = 2048
 # A missed receipt is FATAL on the first miss: we must never stream the next window without the
 # current window's receipt (that is what overruns the device during a deferred flash erase).
 MAX_PRN_MISSES = 1
