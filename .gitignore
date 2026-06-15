@@ -6,3 +6,8 @@ build/
 dist/
 _probe*/
 .DS_Store
+# saved flash logs (the app writes these next to the exe / in the repo dir)
+meshcore-flash-log-*.txt
+*.log
+# DFU-research scratch tools that belong with MeshForge, not this public repo
+dfu_watch.py
