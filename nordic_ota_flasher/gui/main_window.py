@@ -215,8 +215,8 @@ class MainWindow(QWidget):
             f"1–{C.PRN_MAX_SAFE} = the phone's nRF-app config (Packet-Receipt-Notifications): stream "
             "write-WITHOUT-response and gate on the device's receipt every N packets. Usually FASTER "
             "(~3.2 KiB/s measured at MTU 23 with PRN 5). Windows gives no per-packet back-pressure "
-            "here, so a high PRN can overrun a small-buffer bootloader — 10 is the legacy-DFU max "
-            "(the device rejects higher). Start at 5.\n"
+            "here, so a high PRN can overrun a small-buffer bootloader, and some bootloaders reject a "
+            "very high value (a clean fail) — the nRF reference uses ~10–12. Start at 5.\n"
             "Safe to experiment: a corrupted transfer fails the CRC check and is NOT activated "
             "(old firmware is kept)."
         )

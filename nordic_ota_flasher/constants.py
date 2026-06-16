@@ -63,10 +63,10 @@ ADAFRUIT_DEVICE_TYPE = 0x0052  # 82
 # hung waiting for them. PRN > 0 remains a selectable FALLBACK (gate on the 0x11 receipts), and is
 # hard-capped at PRN_MAX_SAFE to keep a window under the bootloader's ~8-packet RX pool.
 DEFAULT_PRN = 0
-PRN_MAX_SAFE = 10  # max selectable PRN. 10 is the legacy-DFU device ceiling (it rejects >10 with
-# OPERATION_FAILED). PRN > 0 selects the phone's no-response + receipt-gated mode; measured ~3.2 KiB/s
-# at PRN 5 (MTU 23) vs ~0.9 at PRN 0. A high PRN on a small-RX-pool bootloader can overrun, so it's
-# user-selectable, not the default.
+PRN_MAX_SAFE = 99  # PRN spinner ceiling (fully user-selectable for experimentation). PRN > 0 selects
+# the phone's no-response + receipt-gated mode; measured ~3.2 KiB/s at PRN 5 (MTU 23) vs ~0.9 at PRN 0.
+# The Nordic reference treats ~10-12 as the practical max and some bootloaders reject a too-high value
+# (a clean OPERATION_FAILED, no harm); a high PRN can also overrun a small-RX-pool bootloader. Not the default.
 
 # Firmware-packet flow control = WRITE-WITH-RESPONSE on the DFU Packet characteristic (0x1532).
 # The phone paces off Android's onCharacteristicWrite callback (exactly one no-response write in
