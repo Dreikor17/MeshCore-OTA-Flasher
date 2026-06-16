@@ -208,19 +208,20 @@ class MainWindow(QWidget):
         self.prn_spin.setValue(C.DEFAULT_PRN)
         self.prn_spin.setToolTip(
             "Firmware flow-control mode.\n"
-            "0 = RECOMMENDED — stream with write-WITH-response: each packet is acknowledged by the "
-            "device before the next is sent (true per-packet back-pressure). Reliable on Windows, "
-            "including the stock 'AdaDFU' bootloader. Slower at MTU 23 (one packet per round-trip).\n"
+            "0 = SAFE DEFAULT — stream with write-WITH-response: each packet is acknowledged by the "
+            "device before the next is sent (true per-packet back-pressure). Reliable on Windows "
+            "including the stock 'AdaDFU' bootloader, but slower at MTU 23 (~0.9 KiB/s, one packet "
+            "per round-trip).\n"
             f"1–{C.PRN_MAX_SAFE} = the phone's nRF-app config (Packet-Receipt-Notifications): stream "
-            "write-WITHOUT-response and gate on the device's receipt every N packets. Can be faster "
-            "if your adapter pipelines no-response writes, but Windows gives no per-packet back-"
-            "pressure, so it may stall like older builds (the phone avoids that with a fast "
-            "connection interval Windows can't request). Try 5 to mirror the nRF app.\n"
+            "write-WITHOUT-response and gate on the device's receipt every N packets. Usually FASTER "
+            "(~3.2 KiB/s measured at MTU 23 with PRN 5). Windows gives no per-packet back-pressure "
+            "here, so a high PRN can overrun a small-buffer bootloader — 10 is the legacy-DFU max "
+            "(the device rejects higher). Start at 5.\n"
             "Safe to experiment: a corrupted transfer fails the CRC check and is NOT activated "
             "(old firmware is kept)."
         )
         opt_row.addWidget(self.prn_spin)
-        prn_note = QLabel("(0 = off, like the phone app — recommended)")
+        prn_note = QLabel("(0 = safe default · 5 ≈ 3.5× faster, like the nRF app)")
         prn_note.setStyleSheet("color: gray;")
         opt_row.addWidget(prn_note)
         gv.addLayout(opt_row)
@@ -628,25 +629,15 @@ class MainWindow(QWidget):
             f"{_fmt_bytes(sent)} / {_fmt_bytes(total)}  •  {kib_s:.1f} KiB/s  •  ETA {eta:0.0f}s"
         )
 
-    def _clear_devices(self) -> None:
-        """Drop the found-devices list — entries go stale the moment a flash completes (the node
-        reboots into the new firmware, or into the new bootloader on a fresh DFU advert)."""
-        self.device_list.clear()
-        self._devices = []
-        self._selected = None
-
     def _on_finished(self, ok: bool, message: str) -> None:
         self._set_busy(False)
         self.phase_label.setText("Complete" if ok else "Failed")
         self._log(("SUCCESS: " if ok else "ERROR: ") + message)
         if ok:
             self.progress.setValue(100)
-            # The flash completed, so the node has rebooted (into the new firmware, or into the
-            # new bootloader for stage 2) and every entry in the found-devices list is now stale.
-            self._clear_devices()
             # After a bootloader flash the node sits in DFU mode (app not bootable) — clear the
             # loaded bootloader package so the user picks the MeshCore app for stage 2, and
-            # auto-rescan so the list repopulates with the fresh *_DFU target.
+            # auto-rescan so the list refreshes with the fresh *_DFU target.
             if self._image is not None and self._image.is_bootloader:
                 self._image = None
                 self._firmware_path = None
@@ -654,6 +645,11 @@ class MainWindow(QWidget):
                     "Bootloader updated — now select the MeshCore <b>app</b> firmware and flash "
                     "it (tick 'skip trigger'). Your node keeps its name + private key."
                 )
+                # The old DFU target rebooted onto a fresh advert; drop the stale selection and
+                # auto-rescan so stage 2 lands on the new *_DFU device. (The list itself is left
+                # for the rescan to refresh — we don't wipe it on a normal app flash.)
+                self._selected = None
+                self.device_list.clearSelection()
                 QTimer.singleShot(3000, self.on_scan)
             self._refresh_flash_enabled()
             QMessageBox.information(self, "Flash complete", message)
