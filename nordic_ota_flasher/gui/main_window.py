@@ -370,6 +370,15 @@ class MainWindow(QWidget):
     # ----------------------------------------------------------- scan
     @asyncSlot()
     async def on_scan(self) -> None:
+        await self._do_scan()
+
+    async def _rescan_after_bootloader(self) -> None:
+        # After a bootloader flash the node reboots into the new bootloader and re-advertises its
+        # DFU target on a fresh address; give it a moment to come up, then scan so stage 2 finds it.
+        await asyncio.sleep(2.0)
+        await self._do_scan()
+
+    async def _do_scan(self) -> None:
         if self._busy:
             return
         self._set_busy(True)
@@ -633,25 +642,29 @@ class MainWindow(QWidget):
         self._set_busy(False)
         self.phase_label.setText("Complete" if ok else "Failed")
         self._log(("SUCCESS: " if ok else "ERROR: ") + message)
-        if ok:
-            self.progress.setValue(100)
-            # After a bootloader flash the node sits in DFU mode (app not bootable) — clear the
-            # loaded bootloader package so the user picks the MeshCore app for stage 2, and
-            # auto-rescan so the list refreshes with the fresh *_DFU target.
-            if self._image is not None and self._image.is_bootloader:
-                self._image = None
-                self._firmware_path = None
-                self.fw_info.setText(
-                    "Bootloader updated — now select the MeshCore <b>app</b> firmware and flash "
-                    "it (tick 'skip trigger'). Your node keeps its name + private key."
-                )
-                # The old DFU target rebooted onto a fresh advert; drop the stale selection and
-                # auto-rescan so stage 2 lands on the new *_DFU device. (The list itself is left
-                # for the rescan to refresh — we don't wipe it on a normal app flash.)
-                self._selected = None
-                self.device_list.clearSelection()
-                QTimer.singleShot(3000, self.on_scan)
-            self._refresh_flash_enabled()
-            QMessageBox.information(self, "Flash complete", message)
-        else:
+        if not ok:
             QMessageBox.critical(self, "Flash failed", message)
+            return
+        self.progress.setValue(100)
+        flashed_bootloader = self._image is not None and self._image.is_bootloader
+        if flashed_bootloader:
+            # The node now sits in DFU mode (no bootable app) — clear the loaded bootloader package
+            # so the user picks the MeshCore app for stage 2, and drop the stale device selection
+            # (the node rebooted onto a fresh DFU advert). The list itself is refreshed by the
+            # auto-rescan below; a normal app flash leaves it untouched.
+            self._image = None
+            self._firmware_path = None
+            self.fw_info.setText(
+                "Bootloader updated — now select the MeshCore <b>app</b> firmware and flash "
+                "it (tick 'skip trigger'). Your node keeps its name + private key."
+            )
+            self._selected = None
+            self.device_list.clearSelection()
+        self._refresh_flash_enabled()
+        QMessageBox.information(self, "Flash complete", message)
+        if flashed_bootloader:
+            # Auto-scan for the rebooted bootloader's fresh DFU target. Done AFTER the dialog (so
+            # the scan isn't blocked by the modal event loop) and scheduled on the asyncio loop so
+            # it runs reliably. Stage 2 then lands on the new *_DFU device.
+            self._log("Auto-scanning for the bootloader's DFU target…")
+            asyncio.ensure_future(self._rescan_after_bootloader())
