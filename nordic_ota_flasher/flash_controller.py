@@ -100,10 +100,26 @@ class FlashController(QObject):
                     manual_reset = await dfu.run()
                     break
                 except DfuNoFirstReceipt as e:
-                    # Device took START + init but never acked the first firmware window — the
-                    # packet-size/PRN geometry is wrong for its RX buffer pool. Reset the
-                    # half-started transfer, then try the next (smaller) chunk geometry.
                     self.log.emit(str(e))
+                    if image.is_bootloader:
+                        # NEVER auto-SYS_RESET during a SoftDevice+Bootloader update — a reset
+                        # while the SD region is mid-write/erase can corrupt the SoftDevice and
+                        # drop the node off BLE (the exact failure seen in the field: reset ->
+                        # node unreachable). The chunk ladder can't help either: the stock
+                        # 'AdaDFU' bootloader is MTU 23, so every rung is the same 20-byte
+                        # geometry. Fail cleanly and let the user power-cycle / recover over USB.
+                        raise DfuError(
+                            "The stock bootloader took START + the init packet but never "
+                            "acknowledged the first firmware window. NOT auto-resetting — a reset "
+                            "during a SoftDevice write can corrupt it. Power-cycle the node. "
+                            "Installing a bootloader over BLE through the stock 'AdaDFU' "
+                            "bootloader is unreliable; the robust path is USB (double-tap reset "
+                            "-> drag the .uf2). Once OTAFIX 2.1+ is on it, bootloader OTA-over-BLE "
+                            "is reliable."
+                        )
+                    # App image: device took START + init but never acked the first firmware
+                    # window — the packet-size/PRN geometry may be wrong for its RX buffer pool.
+                    # Reset the half-started transfer, then try the next (smaller) chunk geometry.
                     self.phase.emit("Resetting bootloader")
                     try:
                         await dfu.send_sys_reset()
@@ -150,6 +166,17 @@ class FlashController(QObject):
                 except DfuInvalidState:
                     # Bootloader wedged in a non-IDLE state (a prior transfer aborted
                     # mid-stream). Only a reset clears it — not a smaller chunk.
+                    if image.is_bootloader:
+                        # NEVER auto-SYS_RESET during a SoftDevice+Bootloader update: a reset
+                        # while the SD region is mid-erase can corrupt the SoftDevice and kill
+                        # BLE. Fail cleanly and let the user power-cycle / recover over USB.
+                        raise DfuError(
+                            "The bootloader update stalled mid-transfer. NOT auto-resetting — a "
+                            "reset during a SoftDevice erase can corrupt it. Power-cycle the node. "
+                            "Installing a bootloader over BLE through the stock 'AdaDFU' bootloader "
+                            "is unreliable; the robust path is USB (double-tap reset -> drag the "
+                            ".uf2). Once OTAFIX 2.1+ is on it, bootloader OTA-over-BLE is reliable."
+                        )
                     if resets_used >= max_resets:
                         raise DfuError(
                             "The bootloader is stuck in a non-IDLE DFU state and did not "

@@ -14,7 +14,7 @@ Nordic DFU protocol used by the Adafruit nRF52 bootloader and the
 
 ## Download
 
-Grab **`MeshCore-OTA-Flasher-v0.2.4.exe`** from the
+Grab **`MeshCore-OTA-Flasher-v0.3.2.exe`** from the
 [**latest release**](https://github.com/Dreikor17/MeshCore-OTA-Flasher/releases/latest) — a
 single self-contained file, no install needed. Just run it.
 
@@ -65,20 +65,27 @@ after an OTA performed while on USB, and OTA is slower. You can flash OTAFIX **o
 - Keep a USB recovery path ready (double-tap reset → [flasher.meshcore.io](https://flasher.meshcore.io)).
 - **Don't** OTA-flash the bootloader on a remote node you can't physically reach.
 
-## If a flash keeps failing or the device ends "short"
+## How the transfer works (and tuning it)
 
-The client follows the Nordic reference's strict flow control: after each small batch of
-packets it **waits for the device's receipt** before sending more, and waits as long as the
-device needs — the SoftDevice can pause for several seconds to erase a flash page, and that's
-normal (you'll see a brief "device busy — waiting…" note). It never streams ahead, so it won't
-overrun the bootloader. If a flash still ends short:
+By default the flasher streams the firmware **one packet at a time using write-with-response** —
+each packet is acknowledged by the device before the next is sent. That gives true per-packet
+back-pressure, so the bootloader can never be outrun, and the tool simply waits whenever the
+device pauses to erase flash (you'll see a "device busy — waiting…" note). This mirrors what the
+Nordic nRF mobile app does, and it's what makes flashing the **stock AdaDFU bootloader** reliable.
 
-- **Lower the PRN** (try 6, then 4). Smaller batches are safer on a weak link.
-- **Save the verbose log** so the exact failure point can be pinpointed.
+The **PRN** control picks the flow-control mode:
+- **0 (default, recommended)** — write-with-response, as above. Reliable everywhere.
+- **1–6** — the nRF app's config: stream write-*without*-response and check the device's receipt
+  every N packets. Can be faster on a BLE adapter that pipelines, but Windows gives no per-packet
+  back-pressure there, so it may stall — use only to experiment.
 
-The firmware streams at the full packet size (MTU-3, ~244 bytes) — exactly what the Nordic
-mobile app uses — and falls back to a smaller packet automatically if an adapter can't sustain
-it. (Feeding this bootloader 20-byte packets is what made earlier versions stall.)
+If a flash fails, **save the verbose log** (it reports per-packet timing) so the exact point can
+be pinpointed. A corrupted transfer fails the final CRC check and is **not** activated — the old
+firmware stays put.
+
+**Speed:** at the stock / early-OTAFIX bootloader's ATT MTU of 23 a flash runs ~0.9 KiB/s — a
+Windows BLE limit (one acknowledged packet per connection interval), not a bug. Installing a
+**high-MTU OTAFIX (2.1+)** bootloader raises the MTU to 247 and flashes roughly 10× faster.
 
 > Separately, the **stock** "AdaDFU" bootloader can fail to auto-reboot after an OTA done while
 > on USB — flash on battery, or install OTAFIX, to avoid that. (That's a *post*-flash reboot
@@ -110,6 +117,28 @@ unused Qt modules).
 - For clean, unattended OTAs, run the OTAFIX bootloader and keep a USB recovery path handy.
 
 ## Releases / Changelog
+
+### v0.3.2
+Major reliability release — OTA now mirrors the Nordic nRF Android app, and **flashing the stock
+RAK/AdaDFU bootloader to OTAFIX over BLE works** (it stalled mid-transfer before).
+- **Matched the phone's flow control.** The nRF app streams with packet-receipt-notifications
+  **off**, paced one packet at a time by the BLE stack. The flasher now does the same: by default
+  it streams **write-with-response** (each packet acknowledged before the next), the per-packet
+  back-pressure Windows/WinRT otherwise can't provide. This fixed the stock-bootloader
+  SoftDevice+Bootloader flash that previously went silent partway through.
+- **Brick-safety:** the tool never auto-resets the node during a bootloader (SD+BL) flash — a
+  reset mid-SoftDevice-erase could corrupt it. A failed flash fails cleanly instead.
+- **PRN is now a flow-control selector:** `0` (default) = write-with-response, reliable
+  everywhere; `1–6` = the nRF app's config (write-without-response + a receipt every N packets),
+  which can be faster on adapters that pipeline.
+- Receipt/ack waits are now long and **disconnect-bounded**, like the phone's untimed waits — a
+  slow flash erase is ridden out; a real link drop aborts instantly.
+- The found-devices list **clears after a flash completes**, and verbose logging now reports
+  per-packet timing (ms/packet).
+- Transient GitHub API errors (gateway timeouts) are retried so the OTA-fix board list survives a
+  hiccup.
+- *Note:* at the stock bootloader's MTU 23 a flash is slow (~0.9 KiB/s) — a Windows BLE limit; a
+  high-MTU **OTAFIX 2.1+** bootloader is roughly 10× faster.
 
 ### v0.2.4
 Patch — fixes flashes freezing mid-transfer on faster BLE adapters.

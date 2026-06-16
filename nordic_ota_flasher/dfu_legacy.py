@@ -67,6 +67,7 @@ class LegacyDfu:
         self._verbose = verbose
         self._unknown_logged = 0
         self._eff_prn = 0
+        self._packet_response = True  # write-with-response packets (set per-run in run())
         self._prn_misses_total = 0  # cumulative multi-second receipt stalls (USB-reset tell)
         # populated by _stream_firmware for the post-flash summary
         self.transfer_bytes = 0
@@ -189,13 +190,24 @@ class LegacyDfu:
 
         self.t.drain()
 
+        # Decide the firmware flow-control model up front (applies to the size block, init data,
+        # and every firmware packet). _effective_prn is independent of the chunk size.
+        self._eff_prn = self._effective_prn(self.t.chunk_size)
+        # PRN == 0 (default) → write-WITH-response on every packet: each await returns only after
+        # the device ATT-acks the packet, so exactly one packet is in flight and it can't be
+        # outrun — the WinRT stand-in for the phone's onCharacteristicWrite gate. PRN > 0 → the
+        # phone's pvmesh config: write-WITHOUT-response + receipt gating every N packets (faster on
+        # an adapter that pipelines, but WinRT gives no per-packet back-pressure for no-response
+        # writes, so it may stall like older builds — we can't request the phone's HIGH conn priority).
+        self._packet_response = (self._eff_prn == 0) and C.PACKET_WRITE_WITH_RESPONSE
+
         # 1) START
         self._log(
             f"START_DFU mode={img.mode_label} "
             f"(sd={img.sd_size}, bl={img.bl_size}, app={img.app_size}, total={img.total_size} B)"
         )
         await self.t.write_ctrl(bytes([C.OP_START_DFU, img.mode]))
-        await self.t.write_packet(img.size_block)
+        await self.t.write_packet(img.size_block, response=self._packet_response)
         await self._await_response(C.OP_START_DFU, timeout=C.START_DFU_TIMEOUT_S)
 
         # 2) INIT packet
@@ -203,14 +215,17 @@ class LegacyDfu:
         await self.t.write_ctrl(bytes([C.OP_RECEIVE_INIT, C.INIT_RX]))
         cs = self.t.chunk_size
         for i in range(0, len(img.dat_data), cs):
-            await self.t.write_packet(img.dat_data[i : i + cs])
+            await self.t.write_packet(img.dat_data[i : i + cs], response=self._packet_response)
         await self.t.write_ctrl(bytes([C.OP_RECEIVE_INIT, C.INIT_COMPLETE]))
-        await self._await_response(C.OP_RECEIVE_INIT)
+        # Long timeout: a no-lazy-erase bootloader may begin region prep here (consistent with
+        # the "wait as long as the phone" strategy used for START/PRN waits).
+        await self._await_response(C.OP_RECEIVE_INIT, timeout=C.START_DFU_TIMEOUT_S)
 
-        # 3) Packet-receipt-notification interval (flow control). Scaled to the chunk size
-        # so the bytes-in-flight stay near TARGET_PRN_BYTES regardless of negotiated MTU.
+        # 3) Packet-Receipt-Notification interval. DEFAULT (DEFAULT_PRN=0) → _effective_prn==0 →
+        # we SKIP Op 0x08 entirely, exactly like the Nordic phone app on Android 6+: no receipts,
+        # flow control comes from per-packet write-with-response back-pressure instead. Only the
+        # PRN-fallback (a non-zero PRN, hard-capped at PRN_MAX_SAFE) sends 0x08 and gates on receipts.
         cs = self.t.chunk_size
-        self._eff_prn = self._effective_prn(cs)
         if self._eff_prn > 0:
             self._log(
                 f"Setting packet-receipt interval = {self._eff_prn} "
@@ -219,7 +234,16 @@ class LegacyDfu:
             await self.t.write_ctrl(bytes([C.OP_PKT_RCPT_REQ]) + struct.pack("<H", self._eff_prn))
 
         # 4) RECEIVE firmware
-        self._log("Streaming firmware image...")
+        if self._eff_prn > 0:
+            self._log(
+                f"Streaming firmware image (write-without-response, PRN {self._eff_prn} — gating "
+                "on device receipts; the phone's pvmesh config)..."
+            )
+        else:
+            self._log(
+                "Streaming firmware image (write-with-response per-packet back-pressure, PRN off "
+                "— the reliable WinRT flow control)..."
+            )
         await self.t.write_ctrl(bytes([C.OP_RECEIVE_FW]))
         await self._stream_firmware()
         # The "image received" handshake can be missed even when the device actually got the
@@ -229,7 +253,7 @@ class LegacyDfu:
         # (CRC_ERROR) or rejects (INVALID_STATE) and the controller retries — still safe.
         try:
             await self._await_response(
-                C.OP_RECEIVE_FW, timeout=max(60.0, len(self.img.bin_data) / 50000)
+                C.OP_RECEIVE_FW, timeout=C.ACK_BACKSTOP_S
             )
             self._log("Firmware image received by device.")
         except DfuError:
@@ -243,17 +267,21 @@ class LegacyDfu:
         self.t.drain()  # clear any backlogged/late notifications so the ack reads clean
         await self.t.write_ctrl(bytes([C.OP_VALIDATE]))
         try:
-            await self._await_response(C.OP_VALIDATE)
+            # Long timeout: VALIDATE runs a CRC pass over the whole image (~190 KB for SD+BL)
+            # and the stock bootloader can withhold this ack for tens of seconds.
+            await self._await_response(C.OP_VALIDATE, timeout=C.START_DFU_TIMEOUT_S)
         except DfuInvalidState:
             # VALIDATE is "invalid" only because the device never reached "received-all" — it is
-            # SHORT. We streamed the whole image, so a window was lost in transit. With the
-            # receipt-gate fix this should be rare; surface it clearly and clear the wedged state
-            # so the next attempt (or a smaller chunk) starts clean.
+            # SHORT. We streamed the whole image, so a window was lost in transit.
             self._log("Device reports the image is SHORT — a window was lost in transit.")
-            try:
-                await self.send_sys_reset()  # reboot to a clean OTA-DFU state for the next attempt
-            except Exception:  # noqa: BLE001
-                pass
+            if not self.img.is_bootloader:
+                # App image: reboot to a clean OTA-DFU state so the next attempt starts clean.
+                # NEVER do this for a SoftDevice+Bootloader image — a SYS_RESET while the SD
+                # region is mid-write/erase can corrupt the SoftDevice and brick the node.
+                try:
+                    await self.send_sys_reset()
+                except Exception:  # noqa: BLE001
+                    pass
             raise DfuDeviceShort(C.DEVICE_SHORT_MSG)
         self._log("Validation OK.")
 
@@ -300,25 +328,18 @@ class LegacyDfu:
         start = time.monotonic()
         last_emit = 0.0
         last_log = start
-        # Minimum spacing between packet writes to hold the send rate under MAX_STREAM_BPS, so a
-        # fast BLE link can't outrun the device's flash erase/write and wedge it (the receipt is
-        # a received-count, not a flushed-count, so it can't protect against this on its own).
-        min_interval = (cs / C.MAX_STREAM_BPS) if C.MAX_STREAM_BPS > 0 else 0.0
-        last_pkt = start
+        log_interval = 1.0 if self._verbose else 5.0
 
         while sent < total:
             chunk = data[sent : sent + cs]
-            await self.t.write_packet(chunk)
+            await self.t.write_packet(chunk, response=self._packet_response)
+            # Flow control = the write itself (default, PRN off). With PACKET_WRITE_WITH_RESPONSE
+            # the await above returns only after the device ATT-acknowledges this packet, so exactly
+            # one packet is ever in flight and the device can never be outrun — the WinRT stand-in
+            # for the phone's per-write onCharacteristicWrite gate. When PRN > 0 (fallback) the
+            # receipt-gate below adds the legacy byte-count windowing on top.
             sent += len(chunk)
             pkts_since_prn += 1
-            # Rate-limit: keep each write at least min_interval after the previous one. A receipt
-            # wait counts toward the interval (so the first packet after a receipt isn't delayed),
-            # but within a window this throttles a fast link to the flash's sustainable rate.
-            if min_interval:
-                gap = min_interval - (time.monotonic() - last_pkt)
-                if gap > 0:
-                    await asyncio.sleep(gap)
-            last_pkt = time.monotonic()
 
             now = time.monotonic()
             if now - last_emit >= 0.1 or sent == total:
@@ -329,19 +350,26 @@ class LegacyDfu:
 
             # Periodic timestamped progress to the log so a stall is visible, and so we can see
             # whether the device's acked count keeps pace with what we've sent (loss diagnosis).
-            if now - last_log >= 5.0:
+            if now - last_log >= log_interval:
                 el = now - start
                 kib = (sent / 1024 / el) if el > 0 else 0.0
+                acked_note = f", device acked {last_acked} B" if prn > 0 else ""
+                if self._verbose:
+                    pkts = (sent + cs - 1) // cs
+                    mspp = (el * 1000 / pkts) if pkts else 0.0
+                    detail = f", {pkts} pkts, {mspp:.0f} ms/pkt"
+                else:
+                    detail = ""
                 self._log(
                     f"  …streaming {sent * 100 // total}% — {sent}/{total} B, "
-                    f"{kib:.1f} KiB/s, device acked {last_acked} B"
+                    f"{kib:.1f} KiB/s{detail}{acked_note}"
                 )
                 last_log = now
 
-            # Flow control (the load-bearing fix): after N packets BLOCK on the device's
-            # byte-count receipt before sending one more byte — exactly like the Nordic
-            # reference. We never speculate ahead. (No wait after the final packet — the device
-            # sends the RECEIVE ack instead.)
+            # FALLBACK flow control (only when PRN > 0): after N packets BLOCK on the device's
+            # byte-count receipt before sending one more byte. The default path (PRN = 0) skips
+            # this entirely and relies on per-packet write-with-response back-pressure, like the
+            # phone. (No wait after the final packet — the device sends the RECEIVE ack instead.)
             if prn > 0 and pkts_since_prn >= prn and sent < total:
                 timeout = C.FIRST_PRN_TIMEOUT_S if first_prn else C.PRN_TIMEOUT_S
                 t0 = time.monotonic()
@@ -351,13 +379,15 @@ class LegacyDfu:
                     self._prn_misses_total += 1
                     secs = time.monotonic() - t0
                     if first_prn:
-                        # The device received START + init but never acked the first firmware
-                        # window — a packet-size/PRN geometry mismatch with its RX buffer pool.
-                        # Distinct signal so the controller tries the next (smaller) chunk size.
+                        # The device received START + init but went silent on the first firmware
+                        # window for the full timeout. On the stock bootloader this is the
+                        # SoftDevice write/erase hanging the radio, not a packet-size issue (the
+                        # window WAS received). Distinct signal; the controller refuses to reset a
+                        # bootloader image here and fails cleanly.
                         raise DfuNoFirstReceipt(
                             f"No packet-receipt for the first {sent}-byte window in {secs:.0f}s "
                             f"(chunk {cs} B, PRN {prn}) — the device took START and the init "
-                            "packet but is silent on firmware (buffer/PRN geometry mismatch)."
+                            "packet but went silent on the first firmware window."
                         )
                     # Mid-stream silence after earlier receipts → likely wedged; reset + retry.
                     raise DfuInvalidState(
@@ -377,9 +407,10 @@ class LegacyDfu:
 
         self.transfer_bytes = sent
         self.transfer_seconds = max(time.monotonic() - start, 1e-6)
+        acked_note = f"; device last acked {last_acked} B" if prn > 0 else ""
         self._log(
             f"Stream finished: {sent} B in {self.transfer_seconds:.1f}s "
-            f"({self.avg_bps / 8 / 1024:.1f} KiB/s); device last acked {last_acked} B"
+            f"({self.avg_bps / 8 / 1024:.1f} KiB/s){acked_note}"
         )
 
     async def _wait_for_disconnect(self, timeout: float) -> bool:

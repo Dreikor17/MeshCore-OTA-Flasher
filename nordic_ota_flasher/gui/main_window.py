@@ -204,19 +204,23 @@ class MainWindow(QWidget):
         opt_row.addWidget(self.verbose_check)
         opt_row.addWidget(QLabel("PRN:"))
         self.prn_spin = QSpinBox()
-        self.prn_spin.setRange(1, C.PRN_MAX_SAFE)
+        self.prn_spin.setRange(0, C.PRN_MAX_SAFE)
         self.prn_spin.setValue(C.DEFAULT_PRN)
         self.prn_spin.setToolTip(
-            "Packet-Receipt-Notification interval — the device acks every N firmware packets "
-            "(flow control).\n"
-            "Higher N = fewer round-trips = faster, but the bootloader's receive-buffer pool "
-            "holds only ~8 packets, so above ~6 it overruns and goes silent (PRN 10 does).\n"
-            f"Capped at {C.PRN_MAX_SAFE}; 4 is the safe default. Lower it (e.g. 2) on a weak link.\n"
-            "Safe to experiment with: a corrupted transfer fails the CRC check and is NOT "
-            "activated (old firmware is kept)."
+            "Firmware flow-control mode.\n"
+            "0 = RECOMMENDED — stream with write-WITH-response: each packet is acknowledged by the "
+            "device before the next is sent (true per-packet back-pressure). Reliable on Windows, "
+            "including the stock 'AdaDFU' bootloader. Slower at MTU 23 (one packet per round-trip).\n"
+            f"1–{C.PRN_MAX_SAFE} = the phone's nRF-app config (Packet-Receipt-Notifications): stream "
+            "write-WITHOUT-response and gate on the device's receipt every N packets. Can be faster "
+            "if your adapter pipelines no-response writes, but Windows gives no per-packet back-"
+            "pressure, so it may stall like older builds (the phone avoids that with a fast "
+            "connection interval Windows can't request). Try 5 to mirror the nRF app.\n"
+            "Safe to experiment: a corrupted transfer fails the CRC check and is NOT activated "
+            "(old firmware is kept)."
         )
         opt_row.addWidget(self.prn_spin)
-        prn_note = QLabel(f"(device acks every N packets; higher = faster, ≤{C.PRN_MAX_SAFE} for RAK)")
+        prn_note = QLabel("(0 = off, like the phone app — recommended)")
         prn_note.setStyleSheet("color: gray;")
         opt_row.addWidget(prn_note)
         gv.addLayout(opt_row)
@@ -516,6 +520,8 @@ class MainWindow(QWidget):
             boards = await asyncio.to_thread(gh.list_otafix_bootloader_zips)
         except Exception as e:  # noqa: BLE001
             self._log(f"(OTA-fix board list unavailable: {type(e).__name__}: {e})")
+            self.otafix_combo.clear()
+            self.otafix_combo.addItem("(unavailable — click Fetch to retry)")
             return
         self._otafix_assets = boards
         self.otafix_combo.clear()
@@ -622,14 +628,25 @@ class MainWindow(QWidget):
             f"{_fmt_bytes(sent)} / {_fmt_bytes(total)}  •  {kib_s:.1f} KiB/s  •  ETA {eta:0.0f}s"
         )
 
+    def _clear_devices(self) -> None:
+        """Drop the found-devices list — entries go stale the moment a flash completes (the node
+        reboots into the new firmware, or into the new bootloader on a fresh DFU advert)."""
+        self.device_list.clear()
+        self._devices = []
+        self._selected = None
+
     def _on_finished(self, ok: bool, message: str) -> None:
         self._set_busy(False)
         self.phase_label.setText("Complete" if ok else "Failed")
         self._log(("SUCCESS: " if ok else "ERROR: ") + message)
         if ok:
             self.progress.setValue(100)
+            # The flash completed, so the node has rebooted (into the new firmware, or into the
+            # new bootloader for stage 2) and every entry in the found-devices list is now stale.
+            self._clear_devices()
             # After a bootloader flash the node sits in DFU mode (app not bootable) — clear the
-            # loaded bootloader package so the user picks the MeshCore app for stage 2.
+            # loaded bootloader package so the user picks the MeshCore app for stage 2, and
+            # auto-rescan so the list repopulates with the fresh *_DFU target.
             if self._image is not None and self._image.is_bootloader:
                 self._image = None
                 self._firmware_path = None
@@ -637,12 +654,6 @@ class MainWindow(QWidget):
                     "Bootloader updated — now select the MeshCore <b>app</b> firmware and flash "
                     "it (tick 'skip trigger'). Your node keeps its name + private key."
                 )
-                # The node rebooted into the new bootloader on a fresh DFU advert (new MAC),
-                # so the old selection is stale. Clear it and auto-rescan so stage 2 lands on
-                # the new *_DFU device (selecting it auto-ticks 'skip trigger').
-                self._selected = None
-                self.device_list.clearSelection()
-                self._refresh_flash_enabled()
                 QTimer.singleShot(3000, self.on_scan)
             self._refresh_flash_enabled()
             QMessageBox.information(self, "Flash complete", message)
