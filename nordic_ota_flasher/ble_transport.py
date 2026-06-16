@@ -168,10 +168,10 @@ class BleTransport:
 
     async def write_packet(self, data: bytes, response: bool | None = None) -> None:
         # response=True (Write Request) awaits the device's per-packet ATT acknowledgement = genuine
-        # one-in-flight back-pressure — the WinRT substitute for Android's onCharacteristicWrite
-        # gate, which WinRT does not expose for no-response writes. Legal on the legacy DFU Packet
-        # char (0x1532 declares char_props.write=1). response=False is the phone's write type (paced
-        # by the receipt-gate instead). None → the configured default (C.PACKET_WRITE_WITH_RESPONSE).
+        # one-in-flight back-pressure, which WinRT does not provide for no-response writes. Legal on
+        # the legacy DFU Packet char (0x1532 declares char_props.write=1). response=False streams
+        # without that back-pressure (paced by the receipt-gate instead). None → the configured
+        # default (C.PACKET_WRITE_WITH_RESPONSE).
         assert self.client is not None
         if response is None:
             response = C.PACKET_WRITE_WITH_RESPONSE

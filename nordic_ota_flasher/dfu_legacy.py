@@ -140,9 +140,9 @@ class LegacyDfu:
     async def _await_prn(self, timeout: float = 60.0) -> int:
         """Wait for a packet-receipt notification; return the device's bytes-received count.
 
-        Mirrors the Nordic reference, which waits for each receipt effectively forever (bounded
-        only by disconnect): the SoftDevice can defer a flash erase for several seconds behind
-        radio events and legitimately withholds the receipt that whole time. We must wait it out
+        Waits for each receipt effectively forever (bounded only by disconnect): the SoftDevice
+        can defer a flash erase for several seconds behind radio events and legitimately withholds
+        the receipt that whole time. We must wait it out
         and NEVER send the next window early. `timeout` is only a hung-but-connected backstop; a
         real disconnect raises BleDisconnected and aborts immediately. A long wait emits a
         periodic note so the user sees the device is busy, not frozen.
@@ -194,11 +194,10 @@ class LegacyDfu:
         # and every firmware packet). _effective_prn is independent of the chunk size.
         self._eff_prn = self._effective_prn(self.t.chunk_size)
         # PRN == 0 (default) → write-WITH-response on every packet: each await returns only after
-        # the device ATT-acks the packet, so exactly one packet is in flight and it can't be
-        # outrun — the WinRT stand-in for the phone's onCharacteristicWrite gate. PRN > 0 → the
-        # phone's pvmesh config: write-WITHOUT-response + receipt gating every N packets (faster on
-        # an adapter that pipelines, but WinRT gives no per-packet back-pressure for no-response
-        # writes, so it may stall like older builds — we can't request the phone's HIGH conn priority).
+        # the device ATT-acks the packet, so exactly one packet is in flight and it can't be outrun
+        # (true per-packet back-pressure). PRN > 0 → write-WITHOUT-response + receipt gating every N
+        # packets (faster on an adapter that pipelines, but WinRT gives no per-packet back-pressure
+        # for no-response writes, so a high PRN can overrun a small-buffer bootloader).
         self._packet_response = (self._eff_prn == 0) and C.PACKET_WRITE_WITH_RESPONSE
 
         # 1) START
@@ -217,14 +216,14 @@ class LegacyDfu:
         for i in range(0, len(img.dat_data), cs):
             await self.t.write_packet(img.dat_data[i : i + cs], response=self._packet_response)
         await self.t.write_ctrl(bytes([C.OP_RECEIVE_INIT, C.INIT_COMPLETE]))
-        # Long timeout: a no-lazy-erase bootloader may begin region prep here (consistent with
-        # the "wait as long as the phone" strategy used for START/PRN waits).
+        # Long timeout: a no-lazy-erase bootloader may begin region prep here (consistent with the
+        # long, disconnect-bounded waits used for START/PRN).
         await self._await_response(C.OP_RECEIVE_INIT, timeout=C.START_DFU_TIMEOUT_S)
 
-        # 3) Packet-Receipt-Notification interval. DEFAULT (DEFAULT_PRN=0) → _effective_prn==0 →
-        # we SKIP Op 0x08 entirely, exactly like the Nordic phone app on Android 6+: no receipts,
-        # flow control comes from per-packet write-with-response back-pressure instead. Only the
-        # PRN-fallback (a non-zero PRN, hard-capped at PRN_MAX_SAFE) sends 0x08 and gates on receipts.
+        # 3) Packet-Receipt-Notification interval. DEFAULT (DEFAULT_PRN=0) → _effective_prn==0 → we
+        # SKIP Op 0x08 entirely: no receipts, flow control comes from per-packet write-with-response
+        # back-pressure instead. Only a non-zero PRN (hard-capped at PRN_MAX_SAFE) sends 0x08 and
+        # gates on receipts.
         cs = self.t.chunk_size
         if self._eff_prn > 0:
             self._log(
@@ -237,7 +236,7 @@ class LegacyDfu:
         if self._eff_prn > 0:
             self._log(
                 f"Streaming firmware image (write-without-response, PRN {self._eff_prn} — gating "
-                "on device receipts; the phone's pvmesh config)..."
+                "on device receipts)..."
             )
         else:
             self._log(
@@ -335,9 +334,8 @@ class LegacyDfu:
             await self.t.write_packet(chunk, response=self._packet_response)
             # Flow control = the write itself (default, PRN off). With PACKET_WRITE_WITH_RESPONSE
             # the await above returns only after the device ATT-acknowledges this packet, so exactly
-            # one packet is ever in flight and the device can never be outrun — the WinRT stand-in
-            # for the phone's per-write onCharacteristicWrite gate. When PRN > 0 (fallback) the
-            # receipt-gate below adds the legacy byte-count windowing on top.
+            # one packet is ever in flight and the device can never be outrun (true per-packet
+            # back-pressure). When PRN > 0 the receipt-gate below adds byte-count windowing on top.
             sent += len(chunk)
             pkts_since_prn += 1
 
@@ -366,10 +364,10 @@ class LegacyDfu:
                 )
                 last_log = now
 
-            # FALLBACK flow control (only when PRN > 0): after N packets BLOCK on the device's
-            # byte-count receipt before sending one more byte. The default path (PRN = 0) skips
-            # this entirely and relies on per-packet write-with-response back-pressure, like the
-            # phone. (No wait after the final packet — the device sends the RECEIVE ack instead.)
+            # Receipt-gated flow control (only when PRN > 0): after N packets BLOCK on the device's
+            # byte-count receipt before sending one more byte. The default path (PRN = 0) skips this
+            # entirely and relies on per-packet write-with-response back-pressure. (No wait after the
+            # final packet — the device sends the RECEIVE ack instead.)
             if prn > 0 and pkts_since_prn >= prn and sent < total:
                 timeout = C.FIRST_PRN_TIMEOUT_S if first_prn else C.PRN_TIMEOUT_S
                 t0 = time.monotonic()

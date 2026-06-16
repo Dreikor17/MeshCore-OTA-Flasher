@@ -69,10 +69,9 @@ class FlashController(QObject):
             else:
                 self.log.emit(f"Device is already in DFU/bootloader mode: {device.name}")
 
-            # Chunk ladder: full MTU-3 (244 B — exactly what the Nordic Android client sends; it
-            # FILLS the bootloader's MTU-sized RX buffer blocks) first, then 128 B as a fallback
-            # for an adapter that can't sustain the full size. Each rung is a full reconnect +
-            # fresh START_DFU.
+            # Chunk ladder: full MTU-3 (244 B — fills the bootloader's MTU-sized RX buffer blocks)
+            # first, then 128 B as a fallback for an adapter that can't sustain the full size. Each
+            # rung is a full reconnect + fresh START_DFU.
             rungs = [None, 128]
             max_last_rung_tries = 3  # retry the reliable rung on transient failures
             last_rung_tries = 0

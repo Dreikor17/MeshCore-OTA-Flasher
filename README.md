@@ -65,27 +65,45 @@ after an OTA performed while on USB, and OTA is slower. You can flash OTAFIX **o
 - Keep a USB recovery path ready (double-tap reset → [flasher.meshcore.io](https://flasher.meshcore.io)).
 - **Don't** OTA-flash the bootloader on a remote node you can't physically reach.
 
+## RAK4631 bootloader versions
+
+All OTAFIX builds are based on the Adafruit nRF52 bootloader 0.9.2 (SoftDevice s140 6.1.1).
+**OTAFIX 2.1 is the watershed** — the first with high-MTU support (much faster OTA) and the first
+to fix the post-OTA USB auto-reboot. Speeds below are this tool's (✓ measured, ~ projected):
+
+| Bootloader | DFU advert | ATT MTU | USB OK after OTA | Speed (PRN 0 / PRN 5) | Notes |
+|---|---|---|---|---|---|
+| Stock RAK/Adafruit | `AdaDFU` | 23 | ❌ | ~0.9 / ~3.2 KiB/s ✓ | factory baseline |
+| `0.9.2-otafix1` | `AdaDFU` | 23 | ❌ | ~0.9 / ~3.2 KiB/s ✓ | bigger RX buffer; invalid‑fw → reboot to OTA |
+| `0.9.2-OTAFIX1.2-BP1.1` | per‑board | 23 | ❌ | ~0.9 / ~3.2 KiB/s ~ | per‑board advert names; button‑hold → OTA |
+| `0.9.2-OTAFIX1.2-BP1.2` | per‑board | 23 | ❌ | ~0.9 / ~3.2 KiB/s ~ | board additions only |
+| `0.9.2-OTAFIX2.1-BP1.2` ⭐ | `4631_DFU` | **247** | ✅ | ~10 KiB/s ~ | high‑MTU + lazy erase + USB auto‑reboot fix |
+| `0.9.2-OTAFIX2.2-BP1.3` | `4631_DFU` | 247 | ✅ | ~10 KiB/s ~ | newest; +8 dBm BLE TX power |
+
+Flashing **2.2-BP1.3** straight from stock gets you fast OTA *and* USB‑after‑flash in one hop (the
+stock→OTAFIX step itself is always the slow MTU‑23 one).
+
 ## How the transfer works (and tuning it)
 
 By default the flasher streams the firmware **one packet at a time using write-with-response** —
 each packet is acknowledged by the device before the next is sent. That gives true per-packet
 back-pressure, so the bootloader can never be outrun, and the tool simply waits whenever the
-device pauses to erase flash (you'll see a "device busy — waiting…" note). This mirrors what the
-Nordic nRF mobile app does, and it's what makes flashing the **stock AdaDFU bootloader** reliable.
+device pauses to erase flash (you'll see a "device busy — waiting…" note). That's what makes
+flashing the **stock AdaDFU bootloader** reliable.
 
-The **PRN** control picks the flow-control mode:
-- **0 (default, recommended)** — write-with-response, as above. Reliable everywhere.
-- **1–6** — the nRF app's config: stream write-*without*-response and check the device's receipt
-  every N packets. Can be faster on a BLE adapter that pipelines, but Windows gives no per-packet
-  back-pressure there, so it may stall — use only to experiment.
+The **PRN** control picks the flow-control mode (0–99):
+- **0 (default)** — write-with-response, as above. Reliable everywhere; ~0.9 KiB/s at MTU 23.
+- **1–99** — Packet-Receipt-Notifications: stream write-*without*-response and check the device's
+  receipt every N packets. Often faster (≈3.2 KiB/s at MTU 23 with PRN 5), but Windows gives no
+  per-packet back-pressure here, so a high PRN can overrun a small-buffer bootloader. Start at 5.
 
 If a flash fails, **save the verbose log** (it reports per-packet timing) so the exact point can
 be pinpointed. A corrupted transfer fails the final CRC check and is **not** activated — the old
 firmware stays put.
 
-**Speed:** at the stock / early-OTAFIX bootloader's ATT MTU of 23 a flash runs ~0.9 KiB/s — a
-Windows BLE limit (one acknowledged packet per connection interval), not a bug. Installing a
-**high-MTU OTAFIX (2.1+)** bootloader raises the MTU to 247 and flashes roughly 10× faster.
+**Speed:** at the stock / early-OTAFIX bootloader's ATT MTU of 23 a flash runs ~0.9 KiB/s (PRN 0)
+or ~3.2 KiB/s (PRN 5). Installing a **high-MTU OTAFIX (2.1+)** bootloader raises the MTU to 247
+and flashes several times faster.
 
 > Separately, the **stock** "AdaDFU" bootloader can fail to auto-reboot after an OTA done while
 > on USB — flash on battery, or install OTAFIX, to avoid that. (That's a *post*-flash reboot
@@ -119,26 +137,25 @@ unused Qt modules).
 ## Releases / Changelog
 
 ### v0.3.2
-Major reliability release — OTA now mirrors the Nordic nRF Android app, and **flashing the stock
-RAK/AdaDFU bootloader to OTAFIX over BLE works** (it stalled mid-transfer before).
-- **Matched the phone's flow control.** The nRF app streams with packet-receipt-notifications
-  **off**, paced one packet at a time by the BLE stack. The flasher now does the same: by default
-  it streams **write-with-response** (each packet acknowledged before the next), the per-packet
-  back-pressure Windows/WinRT otherwise can't provide. This fixed the stock-bootloader
+Major reliability release — **flashing the stock RAK/AdaDFU bootloader to OTAFIX over BLE now
+works end-to-end** (it stalled mid-transfer before). Verified on hardware: stock → OTAFIX →
+MeshCore firmware.
+- **New default flow control.** Firmware now streams **write-with-response** by default — each
+  packet is acknowledged by the device before the next is sent, giving true per-packet
+  back-pressure so the bootloader can't be outrun. This fixed the stock-bootloader
   SoftDevice+Bootloader flash that previously went silent partway through.
 - **Brick-safety:** the tool never auto-resets the node during a bootloader (SD+BL) flash — a
   reset mid-SoftDevice-erase could corrupt it. A failed flash fails cleanly instead.
 - **PRN is now a flow-control selector:** `0` (default) = write-with-response, reliable
-  everywhere; `1–6` = the nRF app's config (write-without-response + a receipt every N packets),
-  which can be faster on adapters that pipeline.
-- Receipt/ack waits are now long and **disconnect-bounded**, like the phone's untimed waits — a
-  slow flash erase is ridden out; a real link drop aborts instantly.
-- The found-devices list **clears after a flash completes**, and verbose logging now reports
-  per-packet timing (ms/packet).
+  everywhere; higher = write-without-response + a receipt every N packets, which can be faster on
+  adapters that pipeline (≈3.2 KiB/s at MTU 23 with PRN 5, vs ~0.9 at PRN 0).
+- Receipt/ack waits are now long and **disconnect-bounded** — a slow flash erase is ridden out; a
+  real link drop aborts instantly.
+- Verbose logging reports per-packet timing (ms/packet).
 - Transient GitHub API errors (gateway timeouts) are retried so the OTA-fix board list survives a
   hiccup.
-- *Note:* at the stock bootloader's MTU 23 a flash is slow (~0.9 KiB/s) — a Windows BLE limit; a
-  high-MTU **OTAFIX 2.1+** bootloader is roughly 10× faster.
+- *Note:* at the stock bootloader's MTU 23 a flash is slow; a high-MTU **OTAFIX 2.1+** bootloader
+  is several times faster.
 
 ### v0.2.4
 Patch — fixes flashes freezing mid-transfer on faster BLE adapters.
@@ -163,7 +180,7 @@ Patch — fixes a flash stall introduced in v0.2.0.
 Reliability release — OTA now completes end-to-end on RAK4631 / nRF52840 (firmware **and** the
 OTAFIX bootloader), verified on hardware.
 - **Fixed the core stall:** firmware now streams at the full negotiated packet size (MTU-3,
-  ~244 bytes), exactly like the Nordic mobile app. The previous 20-byte path silently exhausted
+  ~244 bytes). The previous 20-byte path silently exhausted
   this bootloader's receive-buffer pool, so it never acknowledged the first packet and the
   transfer hung.
 - **Strict per-window flow control:** waits for each packet-receipt before sending more (never

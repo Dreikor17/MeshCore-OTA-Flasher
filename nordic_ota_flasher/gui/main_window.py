@@ -212,16 +212,16 @@ class MainWindow(QWidget):
             "device before the next is sent (true per-packet back-pressure). Reliable on Windows "
             "including the stock 'AdaDFU' bootloader, but slower at MTU 23 (~0.9 KiB/s, one packet "
             "per round-trip).\n"
-            f"1–{C.PRN_MAX_SAFE} = the phone's nRF-app config (Packet-Receipt-Notifications): stream "
-            "write-WITHOUT-response and gate on the device's receipt every N packets. Usually FASTER "
-            "(~3.2 KiB/s measured at MTU 23 with PRN 5). Windows gives no per-packet back-pressure "
-            "here, so a high PRN can overrun a small-buffer bootloader, and some bootloaders reject a "
-            "very high value (a clean fail) — the nRF reference uses ~10–12. Start at 5.\n"
+            f"1–{C.PRN_MAX_SAFE} = Packet-Receipt-Notifications: stream write-WITHOUT-response and "
+            "gate on the device's receipt every N packets. Usually FASTER (~3.2 KiB/s measured at "
+            "MTU 23 with PRN 5). Windows gives no per-packet back-pressure here, so a high PRN can "
+            "overrun a small-buffer bootloader, and some bootloaders reject a very high value (a "
+            "clean fail). Start at 5.\n"
             "Safe to experiment: a corrupted transfer fails the CRC check and is NOT activated "
             "(old firmware is kept)."
         )
         opt_row.addWidget(self.prn_spin)
-        prn_note = QLabel("(0 = safe default · 5 ≈ 3.5× faster, like the nRF app)")
+        prn_note = QLabel("(0 = safe default · 5 ≈ 3.5× faster)")
         prn_note.setStyleSheet("color: gray;")
         opt_row.addWidget(prn_note)
         gv.addLayout(opt_row)

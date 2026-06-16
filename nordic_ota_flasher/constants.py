@@ -55,35 +55,30 @@ RESP_NAMES = {
 # The bootloader HARD-REQUIRES the .dat device_type to equal this (else NRF_ERROR_FORBIDDEN).
 ADAFRUIT_DEVICE_TYPE = 0x0052  # 82
 
-# Packet-Receipt-Notification interval. DEFAULT IS 0 = DISABLED — this is what the Nordic Android
-# DFU app does: on Android 6+ it flashes with PRN OFF (it never even sends Op 0x08) and streams the
-# image paced purely by the BLE stack accepting each write. Forcing PRN on (our old default 4) and
-# blocking on the bootloader's byte-count receipts is exactly what stalled the stock 'AdaDFU' SD+BL
-# flash — the bootloader stops emitting receipts during the SoftDevice self-overwrite and our gate
-# hung waiting for them. PRN > 0 remains a selectable FALLBACK (gate on the 0x11 receipts), and is
-# hard-capped at PRN_MAX_SAFE to keep a window under the bootloader's ~8-packet RX pool.
+# Packet-Receipt-Notification interval. DEFAULT IS 0 = DISABLED: we never send Op 0x08 and stream
+# the image paced by per-packet write-with-response back-pressure instead. Forcing PRN on (our old
+# default 4) and blocking on the bootloader's byte-count receipts is exactly what stalled the stock
+# 'AdaDFU' SD+BL flash — the bootloader stops emitting receipts during the SoftDevice self-overwrite
+# and our gate hung waiting for them. PRN > 0 is a selectable alternative (gate on the 0x11 receipts).
 DEFAULT_PRN = 0
 PRN_MAX_SAFE = 99  # PRN spinner ceiling (fully user-selectable for experimentation). PRN > 0 selects
-# the phone's no-response + receipt-gated mode; measured ~3.2 KiB/s at PRN 5 (MTU 23) vs ~0.9 at PRN 0.
-# The Nordic reference treats ~10-12 as the practical max and some bootloaders reject a too-high value
-# (a clean OPERATION_FAILED, no harm); a high PRN can also overrun a small-RX-pool bootloader. Not the default.
+# the no-response + receipt-gated mode; measured ~3.2 KiB/s at PRN 5 (MTU 23) vs ~0.9 at PRN 0.
+# ~10-12 is the practical max — some bootloaders reject a too-high value (a clean OPERATION_FAILED,
+# no harm) and a high PRN can overrun a small-RX-pool bootloader. Not the default.
 
 # Firmware-packet flow control = WRITE-WITH-RESPONSE on the DFU Packet characteristic (0x1532).
-# The phone paces off Android's onCharacteristicWrite callback (exactly one no-response write in
-# flight at a time). WinRT gives NO equivalent per-write back-pressure for write-without-response —
-# the await only confirms the LOCAL Windows stack queued the PDU (confirmed by the bleak maintainer;
-# field reports show writes burst then drop the link). The legacy bootloader's Packet char DECLARES
-# char_props.write = 1 (Nordic SDK11 ble_dfu.c), so a Write Request is GATT-legal here and returns a
-# per-packet ATT acknowledgement = true one-in-flight back-pressure that cannot outrun the device —
-# the robust WinRT substitute for the phone's callback gate. NOTE: legal on LEGACY DFU only (a
-# Secure-DFU packet char is write-without-response-only and would reject this); we only target
-# legacy DFU here. Set False to stream write-without-response like the phone (needs PRN as backpressure).
+# WinRT gives NO per-write back-pressure for write-without-response — the await only confirms the
+# LOCAL Windows stack queued the PDU (confirmed by the bleak maintainer; field reports show writes
+# burst then drop the link). The legacy bootloader's Packet char DECLARES char_props.write = 1
+# (Nordic SDK11 ble_dfu.c), so a Write Request is GATT-legal here and returns a per-packet ATT
+# acknowledgement = true one-in-flight back-pressure that cannot outrun the device. NOTE: legal on
+# LEGACY DFU only (a Secure-DFU packet char is write-without-response-only and would reject this);
+# we only target legacy DFU here. Set False to stream write-without-response (needs PRN as backpressure).
 PACKET_WRITE_WITH_RESPONSE = True
 
-# Firmware chunk = MTU-3 (244 at the negotiated 247; 20 at the stock bootloader's MTU 23). The
-# Nordic Android client streams at MTU-3 too. WinRT auto-negotiates the MTU and won't let us force
-# it, but the stock 'AdaDFU' bootloader only grants MTU 23 anyway, so both ends stream 20-byte
-# packets there regardless.
+# Firmware chunk = MTU-3 (244 at the negotiated 247; 20 at the stock bootloader's MTU 23). WinRT
+# auto-negotiates the MTU and won't let us force it, but the stock 'AdaDFU' bootloader only grants
+# MTU 23 anyway, so the chunk is 20 bytes there regardless.
 MAX_CHUNK = 244
 MIN_CHUNK = 20  # one un-fragmented packet at ATT MTU 23 (stock bootloader geometry)
 
@@ -92,8 +87,8 @@ MIN_CHUNK = 20  # one un-fragmented packet at ATT MTU 23 (stock bootloader geome
 MAX_PRN_MISSES = 1
 # Settle time after a SYS_RESET (0x06) recovery before rescanning for the rebooted bootloader.
 SYS_RESET_SETTLE_S = 3.0
-# Response/ack-wait backstop — LONG and DISCONNECT-bounded, matching the Nordic app (whose waits are
-# untimed, bounded only by link loss). A real disconnect still aborts instantly (BleDisconnected
+# Response/ack-wait backstop — LONG and DISCONNECT-bounded (untimed in spirit, bounded only by link
+# loss). A real disconnect still aborts instantly (BleDisconnected
 # wakes next_notification), so a long ceiling costs nothing on a dead link; it only lets a
 # genuinely-slow-but-alive bootloader finish. Used for the START_DFU / INIT / RECEIVE / VALIDATE acks.
 ACK_BACKSTOP_S = 600.0
