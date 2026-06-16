@@ -628,14 +628,25 @@ class MainWindow(QWidget):
             f"{_fmt_bytes(sent)} / {_fmt_bytes(total)}  •  {kib_s:.1f} KiB/s  •  ETA {eta:0.0f}s"
         )
 
+    def _clear_devices(self) -> None:
+        """Drop the found-devices list — entries go stale the moment a flash completes (the node
+        reboots into the new firmware, or into the new bootloader on a fresh DFU advert)."""
+        self.device_list.clear()
+        self._devices = []
+        self._selected = None
+
     def _on_finished(self, ok: bool, message: str) -> None:
         self._set_busy(False)
         self.phase_label.setText("Complete" if ok else "Failed")
         self._log(("SUCCESS: " if ok else "ERROR: ") + message)
         if ok:
             self.progress.setValue(100)
+            # The flash completed, so the node has rebooted (into the new firmware, or into the
+            # new bootloader for stage 2) and every entry in the found-devices list is now stale.
+            self._clear_devices()
             # After a bootloader flash the node sits in DFU mode (app not bootable) — clear the
-            # loaded bootloader package so the user picks the MeshCore app for stage 2.
+            # loaded bootloader package so the user picks the MeshCore app for stage 2, and
+            # auto-rescan so the list repopulates with the fresh *_DFU target.
             if self._image is not None and self._image.is_bootloader:
                 self._image = None
                 self._firmware_path = None
@@ -643,12 +654,6 @@ class MainWindow(QWidget):
                     "Bootloader updated — now select the MeshCore <b>app</b> firmware and flash "
                     "it (tick 'skip trigger'). Your node keeps its name + private key."
                 )
-                # The node rebooted into the new bootloader on a fresh DFU advert (new MAC),
-                # so the old selection is stale. Clear it and auto-rescan so stage 2 lands on
-                # the new *_DFU device (selecting it auto-ticks 'skip trigger').
-                self._selected = None
-                self.device_list.clearSelection()
-                self._refresh_flash_enabled()
                 QTimer.singleShot(3000, self.on_scan)
             self._refresh_flash_enabled()
             QMessageBox.information(self, "Flash complete", message)
